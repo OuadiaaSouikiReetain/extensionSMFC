@@ -1,0 +1,18 @@
+{
+  "name": "sfmc-monitor",
+  "version": "1.0.0",
+  "description": "Chrome extension to monitor SFMC Journeys & Automations KPIs using active session",
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "build": "node scripts/build.js",
+    "open": "node scripts/open-chrome.js",
+    "dev": "node scripts/build.js && node scripts/open-chrome.js",
+    "pack": "node scripts/pack.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": ["sfmc", "salesforce", "marketing-cloud", "chrome-extension", "monitoring"],
+  "author": "",
+  "license": "MIT"
+}

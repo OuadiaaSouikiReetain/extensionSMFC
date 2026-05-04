@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SFMC Journey Process Miner</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">Salesforce Marketing Cloud</div>
+        <h1>Journey Process Miner</h1>
+      </div>
+      <div class="actions">
+        <button id="btn-refresh" class="btn secondary" type="button">Actualiser</button>
+        <button id="btn-export" class="btn primary" type="button">Exporter JSON</button>
+      </div>
+    </header>
+
+    <section class="status-card" id="session-card">
+      <div class="status-dot unknown" id="session-dot"></div>
+      <div>
+        <div class="status-title" id="session-title">Analyse de la session...</div>
+        <div class="status-subtitle" id="session-subtitle">Ouvre Journey Builder dans cet onglet DevTools.</div>
+      </div>
+    </section>
+
+    <section class="journey-header">
+      <div>
+        <div class="eyebrow">Journey capturee</div>
+        <h2 id="journey-name">Aucune Journey capturee</h2>
+        <div class="meta-line" id="journey-meta">Version -- | 0 activite</div>
+      </div>
+      <div class="score-grid">
+        <div class="score-card">
+          <span class="score-label">Entrees</span>
+          <strong id="metric-entered">--</strong>
+        </div>
+        <div class="score-card">
+          <span class="score-label">Completes</span>
+          <strong id="metric-completed">--</strong>
+        </div>
+        <div class="score-card">
+          <span class="score-label">Completion</span>
+          <strong id="metric-completion">--</strong>
+        </div>
+        <div class="score-card">
+          <span class="score-label">Bottlenecks</span>
+          <strong id="metric-bottlenecks">--</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <div class="panel-card">
+        <div class="section-heading">
+          <h3>Funnel process mining</h3>
+          <span id="threshold-label">Seuil bottleneck: 20%</span>
+        </div>
+        <div id="empty-state" class="empty-state">
+          Ouvre une Journey dans Journey Builder pour commencer l'analyse.
+        </div>
+        <div id="funnel" class="funnel" hidden></div>
+      </div>
+
+      <aside class="panel-card analysis-card">
+        <div class="section-heading">
+          <h3>Analyse automatique</h3>
+        </div>
+        <div id="analysis" class="analysis">
+          Aucune donnee Journey detaillee n'a encore ete capturee.
+        </div>
+
+        <div class="section-heading compact">
+          <h3>Journeys vues</h3>
+        </div>
+        <div id="journey-list" class="journey-list"></div>
+
+        <div class="section-heading compact">
+          <h3>Canvas DOM</h3>
+        </div>
+        <div id="canvas-list" class="canvas-list">Aucun snapshot DOM pour le moment.</div>
+      </aside>
+    </section>
+
+    <section class="log-card">
+      <div class="section-heading">
+        <h3>Evenements reseau</h3>
+        <span id="request-count">0 requete</span>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <script src="panel.js"></script>
+</body>
+</html>

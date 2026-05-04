@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>SFMC Buddy</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup-body buddy-body">
+  <main class="buddy-shell">
+    <aside class="buddy-sidebar">
+      <div class="brand-block">
+        <div class="brand-logo">SB</div>
+        <div>
+          <h1>SFMC Buddy</h1>
+          <span>v0.6.0</span>
+        </div>
+      </div>
+
+      <div class="bu-card">
+        <div class="eyebrow">Business unit</div>
+        <strong id="bu-name">Ahmed Ouadiaa Souiki</strong>
+        <span id="bu-mid">(536005700)</span>
+      </div>
+
+      <nav class="buddy-nav">
+        <button class="nav-item active" data-view="dashboard">Dashboard</button>
+        <button class="nav-item" data-view="api">API Settings</button>
+        <button class="nav-item" data-view="analytics">Analytics</button>
+        <button class="nav-item" data-view="utilities">Utilities</button>
+      </nav>
+
+      <footer class="buddy-footer">
+        <span>Built by</span>
+        <strong>Ahmed Ouadiaa Souiki</strong>
+        <span>© 2026</span>
+      </footer>
+    </aside>
+
+    <section class="buddy-main">
+      <header class="buddy-topbar">
+        <div>
+          <div class="eyebrow" id="page-eyebrow">Dashboard</div>
+          <h2 id="page-title">Local SFMC snapshot</h2>
+        </div>
+        <div class="session-pill">
+          <span class="status-dot ok" id="session-dot"></span>
+          <div>
+            <span>Session</span>
+            <strong id="session-title">Session online</strong>
+          </div>
+        </div>
+      </header>
+
+      <section id="dashboard-view" class="buddy-view active">
+        <div class="global-search-panel">
+          <input id="global-search" type="search" placeholder="Search everything by name, key, id or URL">
+          <div id="global-results" class="global-results"></div>
+        </div>
+
+        <div class="sync-panel">
+          <div>
+            <div class="eyebrow">Last sync</div>
+            <strong id="last-sync">—</strong>
+          </div>
+          <div>
+            <div class="eyebrow">Cached objects</div>
+            <strong id="cached-total">0</strong>
+          </div>
+          <div>
+            <div class="eyebrow">Local storage</div>
+            <strong id="storage-usage">0 Ko / 10 Mo</strong>
+          </div>
+          <button id="btn-reload" class="btn primary" type="button">Synchronize</button>
+        </div>
+
+        <div class="section-heading">
+          <h3>Explore</h3>
+          <button id="btn-update-all" class="btn secondary" type="button">Update everything</button>
+          <button id="btn-copy-report" class="btn secondary" type="button">Copy inventory report</button>
+        </div>
+        <div class="trace-panel">
+          <div>
+            <strong>Trace SQL/Data Extension</strong>
+            <span>Start trace, then create/run/open a SQL Query or Data Extension in SFMC.</span>
+          </div>
+          <button id="btn-trace-sql" class="btn secondary" type="button">Trace SQL Execution</button>
+        </div>
+
+        <div class="dashboard-tabs">
+          <button class="dashboard-tab active" data-dashboard-tab="global" type="button">Global Dashboard</button>
+          <button class="dashboard-tab" data-dashboard-tab="journeys" type="button">Journeys</button>
+          <button class="dashboard-tab" data-dashboard-tab="automations" type="button">Automations</button>
+          <button class="dashboard-tab" data-dashboard-tab="other" type="button">Other</button>
+        </div>
+
+        <div class="collection-grid">
+          <button class="collection-card" data-tab-group="other" data-collection="folders"><span>Folders</span><strong id="count-folders">0</strong></button>
+          <button class="collection-card" data-tab-group="other" data-collection="dataExtensions"><span>Data Extensions</span><strong id="count-dataExtensions">0</strong></button>
+          <button class="collection-card" data-tab-group="other" data-collection="sqlQueries"><span>SQL Queries</span><strong id="count-sqlQueries">0</strong></button>
+          <button class="collection-card" data-tab-group="other" data-collection="publicationLists"><span>Publication Lists</span><strong id="count-publicationLists">0</strong></button>
+          <button class="collection-card" data-tab-group="other" data-collection="canvasActivities"><span>Canvas Activities</span><strong id="count-canvasActivities">0</strong></button>
+          <button class="collection-card" data-tab-group="other" data-collection="errors"><span>Error Messages</span><strong id="count-errors">0</strong></button>
+          <button class="collection-card" data-tab-group="automations" data-collection="automations"><span>Automations</span><strong id="count-automations">0</strong></button>
+          <button class="collection-card" data-tab-group="other" data-collection="assets"><span>Assets</span><strong id="count-assets">0</strong></button>
+          <button class="collection-card" data-tab-group="journeys" data-collection="journeys"><span>Journeys</span><strong id="count-journeys">0</strong></button>
+        </div>
+
+        <section class="cache-card">
+          <div class="section-heading">
+            <h3>Cache stats</h3>
+            <span>Local snapshot</span>
+          </div>
+          <table class="cache-table">
+            <thead>
+              <tr><th>Object</th><th>Count</th><th>Size (KB)</th><th>Last updated</th></tr>
+            </thead>
+            <tbody id="cache-table-body"></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section id="collection-view" class="buddy-view">
+        <div class="collection-header">
+          <button id="btn-back-dashboard" class="btn secondary" type="button">Back</button>
+          <div>
+            <div class="eyebrow" id="collection-eyebrow">Collection</div>
+            <h2 id="collection-title">Journeys</h2>
+          </div>
+          <button id="btn-run-all-kpis" class="btn primary" type="button" style="display:none">Run KPIs Query</button>
+          <button id="btn-export" class="btn secondary" type="button">Exporter JSON</button>
+        </div>
+        <div id="collection-kpis" class="collection-kpis"></div>
+        <div class="collection-toolbar">
+          <input id="collection-search" type="search" placeholder="Search cached objects">
+          <span id="collection-count">0 object</span>
+        </div>
+        <div id="collection-table" class="object-table"></div>
+      </section>
+
+      <section id="detail-view" class="buddy-view">
+        <div class="collection-header">
+          <button id="btn-back-collection" class="btn secondary" type="button">Back</button>
+          <div>
+            <div class="eyebrow" id="detail-eyebrow">Object detail</div>
+            <h2 id="detail-title">—</h2>
+          </div>
+        </div>
+        <div id="detail-content"></div>
+        <div id="relationship-panel" class="relationship-panel"></div>
+      </section>
+
+      <section id="placeholder-view" class="buddy-view">
+        <div class="empty-state" id="placeholder-text">Section en preparation.</div>
+      </section>
+
+      <section class="log-card popup-log">
+        <div class="section-heading"><h3>Debug</h3><span id="capture-status">idle</span></div>
+        <pre id="log">Waiting...</pre>
+      </section>
+
+      <section class="log-card popup-log">
+        <div class="section-heading">
+          <h3>Captured SQL/Data Extension endpoints</h3>
+          <button id="btn-copy-traces" class="btn secondary" type="button">Copy traces</button>
+        </div>
+        <pre id="trace-log">No traces yet.</pre>
+      </section>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

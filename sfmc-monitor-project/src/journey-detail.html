@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Journey Detail - SFMC Buddy</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="detail-page-body">
+  <main class="detail-page">
+    <header class="detail-hero">
+      <div>
+        <div class="eyebrow">Journey detail</div>
+        <h1 id="journey-title">Loading Journey...</h1>
+        <div class="meta-line" id="journey-meta">SFMC Buddy</div>
+      </div>
+      <div class="actions">
+        <button id="btn-auto-query" class="btn primary" type="button">Auto Run in Query Studio</button>
+        <button id="btn-copy-sql" class="btn secondary" type="button">Copy Data Views SQL</button>
+        <button id="btn-export" class="btn primary" type="button">Export JSON</button>
+      </div>
+    </header>
+
+    <section class="detail-kpi-grid">
+      <div class="collection-kpi"><span>Status</span><strong id="k-status">--</strong></div>
+      <div class="collection-kpi"><span>Version</span><strong id="k-version">--</strong></div>
+      <div class="collection-kpi"><span>Activities</span><strong id="k-activities">--</strong></div>
+      <div class="collection-kpi"><span>Goals</span><strong id="k-goals">--</strong></div>
+      <div class="collection-kpi"><span>Sent</span><strong id="k-sent">0</strong></div>
+      <div class="collection-kpi"><span>Delivered</span><strong id="k-delivered">0</strong></div>
+      <div class="collection-kpi"><span>Unique Opens</span><strong id="k-opens">0</strong></div>
+      <div class="collection-kpi"><span>Unique Clicks</span><strong id="k-clicks">0</strong></div>
+      <div class="collection-kpi"><span>Open Rate</span><strong id="k-open-rate">--</strong></div>
+      <div class="collection-kpi"><span>CTR</span><strong id="k-ctr">--</strong></div>
+      <div class="collection-kpi"><span>CTOR</span><strong id="k-ctor">--</strong></div>
+      <div class="collection-kpi"><span>Bounce Rate</span><strong id="k-bounce-rate">--</strong></div>
+    </section>
+
+    <section class="detail-layout">
+      <div class="panel-card">
+        <div class="section-heading">
+          <h3>Journey steps</h3>
+          <span id="steps-count">0 step</span>
+        </div>
+        <div id="steps-list" class="steps-list"></div>
+      </div>
+
+      <div class="panel-card">
+        <div class="section-heading">
+          <h3>Data Views result</h3>
+          <span>JSON or CSV</span>
+        </div>
+        <p class="hint-text">Execute the generated SQL in Automation Studio / Query Studio, paste the result here, then apply it to fill delivery KPIs.</p>
+        <textarea id="data-view-input" class="wide-textarea" placeholder="Paste Data Views result here"></textarea>
+        <div class="actions">
+          <button id="btn-apply-data" class="btn primary" type="button">Apply Data Views Result</button>
+          <button id="btn-load-query-result" class="btn secondary" type="button">Load captured result</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel-card">
+      <div class="section-heading">
+        <h3>Generated Data Views SQL</h3>
+      </div>
+      <pre id="sql-output" class="json-view"></pre>
+    </section>
+
+    <section class="panel-card">
+      <div class="section-heading">
+        <h3>Raw Journey JSON</h3>
+      </div>
+      <pre id="raw-json" class="json-view"></pre>
+    </section>
+  </main>
+  <script src="journey-detail.js"></script>
+</body>
+</html>
