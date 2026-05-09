@@ -50,8 +50,10 @@ function bindEvents() {
 }
 
 function detectSession() {
-  chrome.devtools.inspectedWindow.eval("location.href", (url, error) => {
-    if (error || !url) {
+  chrome.tabs.get(inspectedTabId, tab => {
+    const err = chrome.runtime.lastError;
+    const url = tab?.url;
+    if (err || !url) {
       setSession(null, "Impossible de lire l'URL de l'onglet inspecte.");
       return;
     }

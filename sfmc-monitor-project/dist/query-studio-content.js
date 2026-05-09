@@ -1,3 +1,5 @@
+// SFMC Buddy v2.1.0 - 2026-05-04
+// Major changes: robust Query Studio editor retry and run-button detection.
 // Query Studio bridge. It reads a pending SQL query from extension storage,
 // attempts to inject it into common editor controls, clicks a Run/Execute button,
 // and stores intercepted result payloads for the Journey detail page.
@@ -15,14 +17,25 @@
   chrome.storage.local.get(["sfmcBuddyPendingQuery"], data => {
     const pending = data.sfmcBuddyPendingQuery;
     if (!pending?.sql) return;
-    setTimeout(() => injectQuery(pending.sql), 1200);
-    setTimeout(() => injectQuery(pending.sql), 3500);
+    injectQueryWithRetry(pending.sql);
   });
 
-  function injectQuery(sql) {
-    const editor = findEditor();
-    if (!editor) return;
+  async function injectQueryWithRetry(sql, maxAttempts = 5) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, attempt * 800));
+      const editor = findEditor();
+      if (!editor) continue;
+      injectQuery(sql, editor);
+      const runButton = findRunButton();
+      if (runButton) {
+        runButton.click();
+        return;
+      }
+    }
+  }
 
+  function injectQuery(sql, editor = findEditor()) {
+    if (!editor) return false;
     if (editor.tagName === "TEXTAREA" || editor.tagName === "INPUT") {
       editor.focus();
       editor.value = sql;
@@ -39,8 +52,7 @@
       editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: sql }));
     }
 
-    const runButton = findRunButton();
-    if (runButton) runButton.click();
+    return true;
   }
 
   function findEditor() {

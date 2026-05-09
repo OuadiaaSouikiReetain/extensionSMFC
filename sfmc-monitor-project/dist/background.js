@@ -1,3 +1,5 @@
+// SFMC Buddy v2.1.0 - 2026-05-04
+// Major changes: configurable capture timeout, alarms purge, notifications, and broader collection capture.
 // Background service worker for Manifest V3.
 // Responsibilities:
 // - Persist captured Journey JSON and canvas snapshots in chrome.storage.local.
@@ -19,6 +21,17 @@ chrome.runtime.onInstalled.addListener(() => {
       chrome.storage.local.set({ [STORAGE_KEY]: defaultState });
     }
   });
+  chrome.alarms.create("purge", { periodInMinutes: 60 });
+  purgeOldData();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  chrome.alarms.create("purge", { periodInMinutes: 60 });
+  purgeOldData();
+});
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === "purge") purgeOldData();
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -69,14 +82,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "POPUP_START_CAPTURE") {
-    startNetworkCapture(message.tabId, message.mode || "journey").then(sendResponse).catch(error => {
+    startNetworkCapture(message.tabId, message.mode || "journey", message.timeoutMs).then(sendResponse).catch(error => {
       sendResponse({ ok: false, error: error.message });
     });
     return true;
   }
 
   if (message.type === "FETCH_SFMC") {
-    fetchSfmc(message).then(sendResponse).catch(error => {
+    fetchSfmcWithCookies(message).then(sendResponse).catch(error => {
       sendResponse({ ok: false, error: error.message });
     });
     return true;
@@ -152,7 +165,7 @@ chrome.debugger.onDetach.addListener(source => {
   if (source.tabId) debuggerSessions.delete(source.tabId);
 });
 
-async function startNetworkCapture(tabId, mode = "journey") {
+async function startNetworkCapture(tabId, mode = "journey", timeoutMs = null) {
   if (!tabId) throw new Error("Missing tab id");
   const target = { tabId };
 
@@ -176,43 +189,195 @@ async function startNetworkCapture(tabId, mode = "journey") {
   await updateTabState(tabId, { captureStatus: "running", captureMode: mode, captureStartedAt: Date.now(), debug: [], traces: [] });
   appendDebug(tabId, `${mode} capture started.`);
   if (mode === "journey") {
-    appendDebug(tabId, "Reloading SFMC tab.");
-    await chrome.tabs.reload(tabId);
+    appendDebug(tabId, "Journey capture armed. Open or refresh the target SFMC view now.");
   } else {
     appendDebug(tabId, "Trace is running. Perform the SQL/Data Extension action in SFMC now.");
   }
 
-  setTimeout(() => stopNetworkCapture(tabId), mode === "sql" ? 60000 : 20000);
+  const duration = Number(timeoutMs) || (mode === "sql" ? 60000 : 20000);
+  if (duration > 0) setTimeout(() => stopNetworkCapture(tabId), duration);
   return { ok: true };
 }
 
-async function fetchSfmc({ url, method = "GET", body = null }) {
-  const response = await fetch(url, {
-    method,
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json"
+async function fetchSfmc({ url, method = "GET", body = null, tabId }) {
+  // 1. Background service worker fetch — no CORS restriction, sends browser cookies
+  //    for the target domain (jbinteractions.*, automationstudio.*, etc.).
+  try {
+    const response = await fetch(url, {
+      method,
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    if (!response.ok) {
+      if (response.status !== 401 || !tabId) {
+        storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: response.status, message: text.slice(0, 500), capturedAt: Date.now() });
+        throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
+      }
+      // 401: try the in-page fallback before giving up
+    } else {
+      return { ok: true, data, status: response.status };
+    }
+  } catch (err) {
+    // Re-throw anything that isn't a 401 (network error, 5xx, etc.)
+    if (!tabId || /HTTP [^4]|HTTP 4[^0]|HTTP 40[^1]/.test(err.message || "")) throw err;
+  }
+
+  // 2. In-page fallback — runs inside the SFMC tab so its session cookies are used
+  //    directly. Works when the tab is on the same subdomain as the request URL.
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async (fetchUrl, fetchMethod, fetchBody) => {
+      const resp = await fetch(fetchUrl, {
+        method: fetchMethod,
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: fetchBody !== null ? JSON.stringify(fetchBody) : undefined
+      });
+      const text = await resp.text();
+      return { status: resp.status, ok: resp.ok, text };
     },
-    body: body ? JSON.stringify(body) : undefined
+    args: [url, method, body]
   });
-  const text = await response.text();
+  if (!result?.result) throw new Error("Empty script result");
+  const { status, ok, text } = result.result;
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!ok) {
+    storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status, message: text.slice(0, 500), capturedAt: Date.now() });
+    throw new Error(`HTTP ${status}: ${text.slice(0, 180)}`);
+  }
+  return { ok: true, data, status };
+}
+
+async function fetchSfmcWithCookies({ url, method = "GET", body = null, tabId }) {
+  const candidates = await findCookieTabCandidates(url, tabId);
+  if (!candidates.length) {
+    throw new Error(`No open SFMC tab with cookies for ${safeHostname(url)}. Open the matching SFMC page and retry.`);
+  }
+
+  let lastError = null;
+  for (const candidateTabId of candidates) {
+    try {
+      return await executeFetchInTab(candidateTabId, url, method, body);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Cookie fetch failed");
+}
+
+async function findCookieTabCandidates(url, preferredTabId) {
+  const targetOrigin = safeOrigin(url);
+  if (!targetOrigin) return [];
+
+  const tabs = await chrome.tabs.query({});
+  const matching = tabs
+    .filter(tab => Number.isInteger(tab.id) && safeOrigin(tab.url) === targetOrigin)
+    .map(tab => tab.id);
+
+  if (preferredTabId && matching.includes(preferredTabId)) {
+    return [preferredTabId, ...matching.filter(id => id !== preferredTabId)];
+  }
+  return matching;
+}
+
+async function executeFetchInTab(tabId, url, method, body) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async (fetchUrl, fetchMethod, fetchBody) => {
+      const readStorageValue = key => {
+        try {
+          return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
+        } catch {
+          return null;
+        }
+      };
+
+      const sanitizeToken = raw => {
+        const value = String(raw || "").trim();
+        if (!value || value === "null" || value === "undefined") return null;
+        return value;
+      };
+
+      const findTokenInStorage = pattern => {
+        for (const storage of [window.localStorage, window.sessionStorage]) {
+          try {
+            for (let i = 0; i < storage.length; i++) {
+              const key = storage.key(i);
+              if (!pattern.test(String(key || ""))) continue;
+              const token = sanitizeToken(storage.getItem(key));
+              if (token) return token;
+            }
+          } catch {
+            // Ignore storage access issues.
+          }
+        }
+        return null;
+      };
+
+      const headers = {
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest"
+      };
+
+      const csrfToken =
+        sanitizeToken(readStorageValue("x-csrf-token")) ||
+        sanitizeToken(readStorageValue("csrfToken")) ||
+        sanitizeToken(readStorageValue("csrf_token")) ||
+        sanitizeToken(document.querySelector("meta[name='csrf-token'], meta[name='x-csrf-token'], meta[name='_csrf']")?.content) ||
+        findTokenInStorage(/csrf/i);
+      if (csrfToken) headers["x-csrf-token"] = csrfToken;
+
+      const fuelDataVersion =
+        sanitizeToken(readStorageValue("x-fueldata-version")) ||
+        sanitizeToken(readStorageValue("fueldataVersion")) ||
+        sanitizeToken(readStorageValue("fuelDataVersion")) ||
+        "1.1";
+      if (fuelDataVersion) headers["x-fueldata-version"] = fuelDataVersion;
+
+      if (fetchBody !== null) headers["Content-Type"] = "application/json";
+
+      const response = await fetch(fetchUrl, {
+        method: fetchMethod,
+        credentials: "include",
+        headers,
+        body: fetchBody !== null ? JSON.stringify(fetchBody) : undefined
+      });
+      const text = await response.text();
+      return { ok: response.ok, status: response.status, text };
+    },
+    args: [url, method, body]
+  });
+
+  if (!result?.result) throw new Error("Empty script result");
+
+  const { ok, status, text } = result.result;
   let data;
   try {
     data = JSON.parse(text);
   } catch {
     data = { raw: text };
   }
-  if (!response.ok) {
+
+  if (!ok) {
     storeGlobalError({
       url: sanitizeHostPath(url),
       fullUrl: url,
-      status: response.status,
+      status,
       message: text.slice(0, 500),
       capturedAt: Date.now()
     });
-    throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
+    throw new Error(`HTTP ${status}: ${text.slice(0, 180)}`);
   }
-  return { ok: true, data, status: response.status };
+
+  return { ok: true, data, status };
 }
 
 async function stopNetworkCapture(tabId) {
@@ -234,7 +399,7 @@ function isJourneyInteractionUrl(url) {
 
 function isSfmcMetricsUrl(url) {
   return /marketingcloudapis\.com|exacttargetapis\.com|marketingcloudapps\.com/i.test(url) &&
-    /interaction|journey|history|analytic|analytics|tracking|report|stat|performance|email|activity/i.test(url);
+    /interaction|journey|automation|query|sql|dataextension|data-extension|asset|folder|category|history|analytic|analytics|tracking|report|stat|performance|email|activity/i.test(url);
 }
 
 function shouldTraceUrl(url, mode) {
@@ -246,7 +411,9 @@ function shouldTraceUrl(url, mode) {
 }
 
 async function handleInteractionPayload(tabId, url, json) {
-  if (Array.isArray(json?.items)) {
+  await storeCapturedCollection(url, json);
+
+  if (isJourneyInteractionUrl(url) && Array.isArray(json?.items)) {
     await updateJourneyList(tabId, json.items);
     appendDebug(tabId, `Journey list captured: ${json.items.length} item(s).`);
   }
@@ -255,6 +422,7 @@ async function handleInteractionPayload(tabId, url, json) {
   if (journey) {
     await updateJourney(tabId, journey);
     appendDebug(tabId, `Journey detail captured: ${journey.name} v${journey.version || "--"}.`);
+    notify("Journey captured", `${journey.name} v${journey.version || "--"}`);
   }
 
   const delivery = extractDeliverySignals(json);
@@ -262,6 +430,49 @@ async function handleInteractionPayload(tabId, url, json) {
     await updateDeliverySignals(tabId, delivery, url);
     appendDebug(tabId, `Delivery metrics captured from ${sanitizeHostPath(url)}.`);
   }
+}
+
+async function storeCapturedCollection(url, json) {
+  const collection = inferCollectionFromUrl(url);
+  if (!collection) return;
+  const items = extractItems(json).map(item => normalizeCollectionItem(collection, item)).filter(Boolean);
+  if (!items.length) return;
+  await updateBuddyCollection(collection, items, sanitizeHostPath(url));
+}
+
+function inferCollectionFromUrl(url) {
+  const u = String(url || "").toLowerCase();
+  if (/\/interaction\/v1\/interactions/.test(u)) return "journeys";
+  if (/\/interaction\/v1\/definitiontemplates/.test(u)) return "journeyTemplates";
+  if (/automation\/v1\/automations|automationstudio/.test(u)) return "automations";
+  if (/automation\/v1\/queries|querydefinition|queryactivity|sql/.test(u)) return "sqlQueries";
+  if (/dataextensions|dataextension|data-extension/.test(u)) return "dataExtensions";
+  if (/asset\/v1\/content\/assets|contentbuilder/.test(u)) return "assets";
+  if (/asset\/v1\/content\/categories|folder|category/.test(u)) return "folders";
+  return null;
+}
+
+function extractItems(json) {
+  const candidates = [json?.items, json?.entry, json?.results, json?.data, json?.automations, json?.assets, json?.categories, json?.templates];
+  const list = candidates.find(Array.isArray);
+  if (list) return list;
+  if (json && typeof json === "object" && (json.id || json.key || json.customerKey || json.objectID || json.name)) return [json];
+  return [];
+}
+
+function normalizeCollectionItem(collection, item) {
+  if (!item || typeof item !== "object") return null;
+  const normalized = {
+    ...item,
+    id: item.id || item.objectID || item.automationId || item.queryDefinitionId || item.key || item.customerKey,
+    name: item.name || item.displayName || item.assetName || item.categoryName || item.definitionName || item.key || item.customerKey || "Untitled",
+    customerKey: item.customerKey || item.key || item.externalKey || null,
+    status: item.status || item.statusName || item.state || item.programStatus || null,
+    capturedAt: Date.now()
+  };
+  if (collection === "journeys") normalized.version = item.version || item.versionNumber || item.latestVersionNumber || null;
+  if (collection === "automations") normalized.lastRunTime = item.lastRunTime || item.lastRunDate || item.lastRun || item.modifiedDate || null;
+  return normalized.id || normalized.name ? normalized : null;
 }
 
 function normalizeJourney(raw) {
@@ -400,6 +611,22 @@ function sanitizeHostPath(rawUrl) {
     return `${url.hostname}${url.pathname}`;
   } catch {
     return String(rawUrl || "").slice(0, 160);
+  }
+}
+
+function safeOrigin(rawUrl) {
+  try {
+    return new URL(rawUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
+function safeHostname(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname;
+  } catch {
+    return "unknown host";
   }
 }
 
@@ -580,6 +807,7 @@ async function updateBuddyCollection(collection, items, source) {
 }
 
 async function storeNetworkError(tabId, request, body) {
+  notify("SFMC network error", `${request.status} ${sanitizeHostPath(request.url)}`);
   await storeGlobalError({
     tabId,
     url: sanitizeHostPath(request.url),
@@ -588,6 +816,33 @@ async function storeNetworkError(tabId, request, body) {
     message: body.slice(0, 800),
     capturedAt: Date.now()
   });
+}
+
+async function purgeOldData() {
+  const state = await getState();
+  const cutoff = Date.now() - 86400000;
+  for (const [tabId, tabState] of Object.entries(state.tabs || {})) {
+    if ((tabState.updatedAt || 0) < cutoff) {
+      delete state.tabs[tabId];
+      continue;
+    }
+    if (tabState.traces?.length > 100) tabState.traces = tabState.traces.slice(-100);
+    if (tabState.debug?.length > 50) tabState.debug = tabState.debug.slice(-50);
+  }
+  await setState(state);
+}
+
+function notify(title, message) {
+  try {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon48.png",
+      title: `SFMC Buddy - ${title}`,
+      message: String(message || "").slice(0, 180)
+    });
+  } catch {
+    // Notifications are best-effort only.
+  }
 }
 
 async function storeGlobalError(error) {

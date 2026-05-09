@@ -1,3 +1,5 @@
+// SFMC Buddy v2.1.0 - 2026-05-04
+// Major changes: broader Journey activity detection and richer canvas snapshots.
 // Content script injected into SFMC pages.
 // Journey Builder is a SPA, so this script watches DOM mutations and periodically
 // extracts visible canvas activities. It does not authenticate or call APIs.
@@ -6,11 +8,228 @@
   "use strict";
 
   const SFMC_HOST_RE = /exacttarget\.com|marketingcloudapis\.com|marketingcloudapps\.com|salesforce\.com/i;
-  const ACTIVITY_SELECTOR = ".activity.wait, .activity.email, .activity.split";
+  const ACTIVITY_SELECTOR = [
+    ".activity.wait",
+    ".activity.email",
+    ".activity.split",
+    ".activity.sms",
+    ".activity.push",
+    ".activity.linearmessage",
+    ".activity.randomsplit",
+    ".activity.engagementsplit",
+    ".activity.updatecontact",
+    ".activity.dataextension",
+    ".activity.fireeventsource",
+    ".activity.custom",
+    "[class*='activity-']",
+    "[data-activity-type]"
+  ].join(", ");
   let lastSignature = "";
   let debounceTimer = null;
 
   if (!SFMC_HOST_RE.test(location.hostname + location.pathname)) return;
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type !== "SFMC_BUDDY_FETCH_JSON") return false;
+
+    const requestUrl = String(message.url || "");
+    const headers = buildSfmcHeaders();
+    const authHeader = headers.Authorization || null;
+
+    fetch(requestUrl, {
+      credentials: "include",
+      headers
+    })
+      .then(async response => {
+        const text = await response.text();
+        sendResponse({
+          ok: response.ok,
+          status: response.status,
+          text,
+          url: requestUrl,
+          authUsed: Boolean(authHeader)
+        });
+      })
+      .catch(error => {
+        sendResponse({
+          ok: false,
+          status: 0,
+          error: error?.message || String(error),
+          url: requestUrl,
+          authUsed: Boolean(authHeader)
+        });
+      });
+
+    return true;
+  });
+
+  function buildSfmcHeaders() {
+    const headers = {
+      Accept: "application/json, text/javascript, */*; q=0.01",
+      "X-Requested-With": "XMLHttpRequest"
+    };
+
+    const authHeader = findAuthorizationHeader();
+    if (authHeader) headers.Authorization = authHeader;
+
+    const csrfToken = findCsrfToken();
+    if (csrfToken) headers["x-csrf-token"] = csrfToken;
+
+    const fuelDataVersion = findFuelDataVersion();
+    if (fuelDataVersion) headers["x-fueldata-version"] = fuelDataVersion;
+
+    return headers;
+  }
+
+  function findAuthorizationHeader() {
+    const directKeys = [
+      "token",
+      "accessToken",
+      "access_token",
+      "authToken",
+      "authorization",
+      "jwt",
+      "platformAuthToken"
+    ];
+
+    for (const key of directKeys) {
+      const hit = readStorageValue(key);
+      const token = extractBearerToken(hit);
+      if (token) return `Bearer ${token}`;
+    }
+
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try {
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          const value = storage.getItem(key);
+          const token = extractBearerToken(value);
+          if (token) return `Bearer ${token}`;
+        }
+      } catch {
+        // Ignore storage access issues.
+      }
+    }
+
+    return null;
+  }
+
+  function findCsrfToken() {
+    const directKeys = [
+      "x-csrf-token",
+      "csrfToken",
+      "csrf_token",
+      "_csrf",
+      "fuelCsrfToken"
+    ];
+
+    for (const key of directKeys) {
+      const hit = readStorageValue(key);
+      const token = sanitizeToken(hit);
+      if (token) return token;
+    }
+
+    const metaToken = document.querySelector("meta[name='csrf-token'], meta[name='x-csrf-token'], meta[name='_csrf']")?.content;
+    if (sanitizeToken(metaToken)) return sanitizeToken(metaToken);
+
+    return findTokenInStorage(/csrf/i);
+  }
+
+  function findFuelDataVersion() {
+    const directKeys = [
+      "x-fueldata-version",
+      "fueldataVersion",
+      "fuelDataVersion"
+    ];
+
+    for (const key of directKeys) {
+      const hit = readStorageValue(key);
+      const version = sanitizeToken(hit);
+      if (version) return version;
+    }
+
+    return "1.1";
+  }
+
+  function readStorageValue(key) {
+    try {
+      return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function extractBearerToken(raw) {
+    if (!raw) return null;
+    const text = String(raw);
+
+    const bearerMatch = text.match(/Bearer\s+([A-Za-z0-9\-_=]+(?:\.[A-Za-z0-9\-_=]+){2,})/i);
+    if (bearerMatch && looksLikeJwt(bearerMatch[1])) return bearerMatch[1];
+
+    const jwtMatch = text.match(/\b([A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+){2,})\b/);
+    if (jwtMatch && looksLikeJwt(jwtMatch[1])) return jwtMatch[1];
+
+    try {
+      const parsed = JSON.parse(text);
+      return extractTokenFromObject(parsed);
+    } catch {
+      return null;
+    }
+  }
+
+  function looksLikeJwt(token) {
+    const parts = String(token || "").split(".");
+    if (parts.length !== 3) return false;
+    return parts.every(part => /^[A-Za-z0-9\-_]+$/.test(part) && part.length >= 8);
+  }
+
+  function extractTokenFromObject(value) {
+    if (!value) return null;
+    if (typeof value === "string") return extractBearerToken(value);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const token = extractTokenFromObject(item);
+        if (token) return token;
+      }
+      return null;
+    }
+    if (typeof value !== "object") return null;
+
+    const priorityKeys = ["authorization", "accessToken", "access_token", "token", "jwt"];
+    for (const key of priorityKeys) {
+      const token = extractTokenFromObject(value[key]);
+      if (token) return token;
+    }
+
+    for (const child of Object.values(value)) {
+      const token = extractTokenFromObject(child);
+      if (token) return token;
+    }
+
+    return null;
+  }
+
+  function findTokenInStorage(pattern) {
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try {
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          if (!pattern.test(String(key || ""))) continue;
+          const token = sanitizeToken(storage.getItem(key));
+          if (token) return token;
+        }
+      } catch {
+        // Ignore storage access issues.
+      }
+    }
+    return null;
+  }
+
+  function sanitizeToken(raw) {
+    const value = String(raw || "").trim();
+    if (!value || value === "null" || value === "undefined") return null;
+    return value;
+  }
 
   function scheduleSnapshot(reason) {
     clearTimeout(debounceTimer);
@@ -175,10 +394,17 @@
   }
 
   function inferActivityType(node) {
-    const text = `${node.className || ""} ${node.getAttribute("data-type") || ""}`.toLowerCase();
+    const text = `${node.className || ""} ${node.dataset.activityType || ""} ${node.getAttribute("data-type") || ""}`.toLowerCase();
     if (text.includes("email")) return "EMAILV2";
     if (text.includes("wait")) return "WAIT";
-    if (text.includes("split")) return "SPLIT";
+    if (text.includes("randomsplit")) return "RANDOMSPLIT";
+    if (text.includes("engagementsplit")) return "ENGAGEMENTSPLIT";
+    if (text.includes("split")) return "DECISIONSPLIT";
+    if (text.includes("sms")) return "SMSMESSAGE";
+    if (text.includes("push")) return "PUSH";
+    if (text.includes("updatecontact")) return "UPDATECONTACT";
+    if (text.includes("dataextension")) return "DATAEXTENSION";
+    if (text.includes("custom")) return "CUSTOM";
     return "UNKNOWN";
   }
 

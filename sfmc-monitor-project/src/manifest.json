@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "SFMC Journey Process Miner",
-  "version": "2.0.0",
-  "description": "Process mining DevTools panel for Salesforce Marketing Cloud Journey Builder using only the active browser session.",
+  "name": "SFMC Buddy",
+  "version": "2.1.0",
+  "description": "Professional SFMC monitoring, Journey process mining, local inventory, SQL utilities, and DevTools network capture.",
   "permissions": [
     "storage",
     "tabs",
     "activeTab",
     "scripting",
-    "debugger"
+    "debugger",
+    "notifications",
+    "alarms"
   ],
   "host_permissions": [
     "*://*.exacttarget.com/*",
@@ -20,6 +22,7 @@
   "background": {
     "service_worker": "background.js"
   },
+  "devtools_page": "devtools.html",
   "content_scripts": [
     {
       "matches": [
