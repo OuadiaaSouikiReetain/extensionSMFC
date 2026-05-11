@@ -1,18 +1,27 @@
 {
-  "name": "sfmc-monitor",
-  "version": "1.0.0",
-  "description": "Chrome extension to monitor SFMC Journeys & Automations KPIs using active session",
+  "name": "sfmc-buddy",
+  "version": "2.2.0",
+  "description": "SFMC monitoring Chrome extension — React + Vite",
+  "type": "module",
   "scripts": {
-    "setup": "node scripts/setup.js",
-    "build": "node scripts/build.js",
-    "open": "node scripts/open-chrome.js",
-    "dev": "node scripts/build.js && node scripts/open-chrome.js",
-    "pack": "node scripts/pack.js"
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "pack": "node scripts/pack.js",
+    "open": "node scripts/open-chrome.js"
   },
-  "engines": {
-    "node": ">=16"
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.2"
   },
-  "keywords": ["sfmc", "salesforce", "marketing-cloud", "chrome-extension", "monitoring"],
-  "author": "",
-  "license": "MIT"
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "terser": "^5.31.3",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1"
+  }
 }

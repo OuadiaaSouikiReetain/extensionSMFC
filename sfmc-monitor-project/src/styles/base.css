@@ -1,0 +1,25 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 14px; -webkit-font-smoothing: antialiased; }
+
+body {
+  font-family: var(--font-body);
+  font-size: .875rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  min-width: 780px;
+  overflow-x: hidden;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: var(--radius-pill); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+a { color: var(--text-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre, .mono { font-family: var(--font-mono); }
+
+::selection { background: var(--brand-surface); color: var(--brand-dark); }

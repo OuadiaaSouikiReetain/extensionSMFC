@@ -1,0 +1,78 @@
+:root {
+  /* ── Backgrounds ─────────────────────────────────────── */
+  --bg-base:        #f0f4f9;
+  --bg-surface:     #ffffff;
+  --bg-elevated:    #f8fafc;
+  --bg-hover:       #eef2f7;
+  --bg-sidebar:     #14213d;
+  --bg-sidebar-hover: #1e3260;
+  --bg-sidebar-active: rgba(77,163,255,.15);
+
+  /* ── Borders ─────────────────────────────────────────── */
+  --border-subtle:  #e2e8f0;
+  --border-default: #cbd5e1;
+  --border-strong:  #94a3b8;
+  --border-focus:   #0066cc;
+
+  /* ── Text ────────────────────────────────────────────── */
+  --text-primary:   #0f172a;
+  --text-secondary: #475569;
+  --text-muted:     #94a3b8;
+  --text-accent:    #0066cc;
+  --text-on-dark:   #e2eaf8;
+  --text-on-dark-muted: #8aa4cc;
+
+  /* ── Brand blue (Salesforce-adjacent) ─────────────────── */
+  --brand:          #0066cc;
+  --brand-dark:     #004fa3;
+  --brand-light:    #4da3ff;
+  --brand-surface:  #e8f1fb;
+  --brand-glow:     rgba(0,102,204,.12);
+  --gradient-brand: linear-gradient(135deg, #0066cc 0%, #0ea5e9 100%);
+
+  /* ── Semantic colours ────────────────────────────────── */
+  --success:         #16a34a;
+  --success-surface: #dcfce7;
+  --success-border:  #86efac;
+  --warning:         #d97706;
+  --warning-surface: #fef3c7;
+  --warning-border:  #fcd34d;
+  --danger:          #dc2626;
+  --danger-surface:  #fee2e2;
+  --danger-border:   #fca5a5;
+  --info:            #2563eb;
+  --info-surface:    #dbeafe;
+  --info-border:     #93c5fd;
+  --neutral:         #64748b;
+  --neutral-surface: #f1f5f9;
+  --neutral-border:  #e2e8f0;
+
+  /* ── Sidebar ─────────────────────────────────────────── */
+  --sidebar-text:        #c8d8f0;
+  --sidebar-text-muted:  #7a96bf;
+  --sidebar-border:      #1e3260;
+  --sidebar-nav-active:  #4da3ff;
+
+  /* ── Shadows ─────────────────────────────────────────── */
+  --shadow-xs:   0 1px 2px rgba(0,0,0,.06);
+  --shadow-sm:   0 1px 4px rgba(0,0,0,.08), 0 0 0 1px var(--border-subtle);
+  --shadow-card: 0 2px 8px rgba(0,0,0,.07), 0 0 0 1px var(--border-subtle);
+  --shadow-elevated: 0 4px 16px rgba(0,0,0,.10), 0 0 0 1px var(--border-subtle);
+  --shadow-focus: 0 0 0 3px var(--brand-glow);
+
+  /* ── Typography ──────────────────────────────────────── */
+  --font-body: Inter, "SF Pro Text", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, Consolas, monospace;
+
+  /* ── Radius ──────────────────────────────────────────── */
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* ── Transitions ─────────────────────────────────────── */
+  --ease: cubic-bezier(.4,0,.2,1);
+  --transition-fast:   .1s var(--ease);
+  --transition-normal: .18s var(--ease);
+}
