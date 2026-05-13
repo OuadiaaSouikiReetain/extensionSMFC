@@ -1,7 +1,7 @@
 import { defineConfig, Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
-import { copyFileSync } from "fs";
+import { copyFileSync, readFileSync, writeFileSync } from "fs";
 
 // After the build, copy the nested HTML outputs to the root-level names
 // that manifest.json and devtools.js expect (popup.html, panel.html, journey-detail.html).
@@ -16,13 +16,18 @@ function flattenHtml(): Plugin {
         ["src/journey-detail/index.html", "journey-detail.html"],
       ];
       for (const [src, dest] of copies) {
-        copyFileSync(resolve(dist, src), resolve(dist, dest));
+        const sourcePath = resolve(dist, src);
+        const destPath = resolve(dist, dest);
+        copyFileSync(sourcePath, destPath);
+        const html = readFileSync(destPath, "utf8").replace(/\.\.\/\.\.\//g, "./");
+        writeFileSync(destPath, html, "utf8");
       }
     },
   };
 }
 
 export default defineConfig({
+  base: "./",
   plugins: [react(), flattenHtml()],
   publicDir: "src/static",
   build: {

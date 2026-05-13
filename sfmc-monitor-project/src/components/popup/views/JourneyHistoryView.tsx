@@ -57,7 +57,7 @@ export function JourneyHistoryView() {
 
       {/* Search form */}
       <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-surface)" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <div className="responsive-form-grid" style={{ marginBottom: 10 }}>
 
           {/* Journey selector */}
           <div>
@@ -167,50 +167,52 @@ export function JourneyHistoryView() {
             />
           )
           : (
-            <table className="history-table">
-              <thead>
-                <tr>
-                  <th>Contact Key</th>
-                  <th>Journey</th>
-                  <th>Activity</th>
-                  <th>Type</th>
-                  <th>Status</th>
-                  <th>Entered at</th>
-                  <th>Exited at</th>
-                  <th>Error</th>
-                </tr>
-              </thead>
-              <tbody>
-                {journeyHistoryResults.map((r, i) => (
-                  <tr key={i}>
-                    <td className="mono">{r.contactKey ?? "—"}</td>
-                    <td>
-                      <div style={{ fontWeight: 500 }}>{r.journeyName ?? "—"}</div>
-                      {r.versionNumber != null && (
-                        <div style={{ fontSize: ".68rem", color: "var(--text-muted)" }}>v{r.versionNumber}</div>
-                      )}
-                    </td>
-                    <td>{r.activityName ?? "—"}</td>
-                    <td>
-                      {r.activityType && (
-                        <Badge variant="brand">{r.activityType}</Badge>
-                      )}
-                    </td>
-                    <td>
-                      <Badge variant={historyStatusVariant(r.status)}>{r.status ?? "—"}</Badge>
-                    </td>
-                    <td className="mono" style={{ fontSize: ".7rem" }}>{formatIso(r.enteredAt)}</td>
-                    <td className="mono" style={{ fontSize: ".7rem" }}>{r.exitedAt ? formatIso(r.exitedAt) : "—"}</td>
-                    <td>
-                      {r.errorCode
-                        ? <span title={r.errorMessage ?? ""} style={{ color: "var(--danger)", fontSize: ".72rem" }}>{r.errorCode}</span>
-                        : "—"
-                      }
-                    </td>
+            <div className="history-table-wrap">
+              <table className="history-table">
+                <thead>
+                  <tr>
+                    <th>Contact Key</th>
+                    <th>Journey</th>
+                    <th>Activity</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Entered at</th>
+                    <th>Exited at</th>
+                    <th>Error</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {journeyHistoryResults.map((r, i) => (
+                    <tr key={i}>
+                      <td className="mono">{r.contactKey ?? "—"}</td>
+                      <td>
+                        <div style={{ fontWeight: 500 }}>{r.journeyName ?? "—"}</div>
+                        {r.versionNumber != null && (
+                          <div style={{ fontSize: ".68rem", color: "var(--text-muted)" }}>v{r.versionNumber}</div>
+                        )}
+                      </td>
+                      <td>{r.activityName ?? "—"}</td>
+                      <td>
+                        {r.activityType && (
+                          <Badge variant="brand">{r.activityType}</Badge>
+                        )}
+                      </td>
+                      <td>
+                        <Badge variant={historyStatusVariant(r.status)}>{r.status ?? "—"}</Badge>
+                      </td>
+                      <td className="mono" style={{ fontSize: ".7rem" }}>{formatIso(r.enteredAt)}</td>
+                      <td className="mono" style={{ fontSize: ".7rem" }}>{r.exitedAt ? formatIso(r.exitedAt) : "—"}</td>
+                      <td>
+                        {r.errorCode
+                          ? <span title={r.errorMessage ?? ""} style={{ color: "var(--danger)", fontSize: ".72rem" }}>{r.errorCode}</span>
+                          : "—"
+                        }
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )
         }
       </div>

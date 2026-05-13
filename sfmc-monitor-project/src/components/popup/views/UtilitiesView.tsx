@@ -56,27 +56,28 @@ export function UtilitiesView() {
       try {
         const data = JSON.parse(ev.target?.result as string);
         await importSnapshot(data);
-      } catch { addLog("Import failed: invalid JSON."); }
+      } catch {
+        addLog("Import failed: invalid JSON.");
+      }
     };
     reader.readAsText(file);
   }
 
-  // URL inspector
   const parsedUrl = (() => {
     try {
       const url = new URL(urlInput);
       const stackM = url.hostname.match(/\.s(\d+)\./i);
-      return { hostname: url.hostname, pathname: url.pathname, stack: stackM ? `s${stackM[1]}` : "—", params: [...url.searchParams.entries()] };
-    } catch { return null; }
+      return { hostname: url.hostname, pathname: url.pathname, stack: stackM ? `s${stackM[1]}` : "-", params: [...url.searchParams.entries()] };
+    } catch {
+      return null;
+    }
   })();
 
   return (
     <div className="buddy-content" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-
-      {/* SQL Generator */}
       <div className="card">
         <div className="card-header">
-          <span className="card-title">🗃 Journey KPI SQL</span>
+          <span className="card-title">Journey KPI SQL</span>
           <div className="card-actions">
             <Button variant="secondary" size="sm" onClick={copySql}>Copy</Button>
             <Button variant="primary" size="sm" onClick={openQueryStudio}>Run in Query Studio</Button>
@@ -87,26 +88,24 @@ export function UtilitiesView() {
         </div>
       </div>
 
-      {/* Snapshot */}
       <div className="card">
-        <div className="card-header"><span className="card-title">📦 Snapshot</span></div>
-        <div className="card-body" style={{ display: "flex", gap: 8 }}>
-          <Button variant="secondary" size="sm" onClick={handleExport}>⬇ Export (clipboard)</Button>
-          <Button variant="secondary" size="sm" onClick={() => importRef.current?.click()}>⬆ Import JSON</Button>
+        <div className="card-header"><span className="card-title">Snapshot</span></div>
+        <div className="card-body button-row-wrap">
+          <Button variant="secondary" size="sm" onClick={handleExport}>Export to clipboard</Button>
+          <Button variant="secondary" size="sm" onClick={() => importRef.current?.click()}>Import JSON</Button>
           <input ref={importRef} type="file" accept=".json" style={{ display: "none" }} onChange={handleImportFile} />
         </div>
       </div>
 
-      {/* URL Inspector */}
       <div className="card">
-        <div className="card-header"><span className="card-title">🔗 URL Inspector</span></div>
+        <div className="card-header"><span className="card-title">URL Inspector</span></div>
         <div className="card-body">
-          <input className="input" placeholder="Paste an SFMC URL…" value={urlInput} onChange={e => setUrlInput(e.target.value)} />
+          <input className="input" placeholder="Paste an SFMC URL..." value={urlInput} onChange={e => setUrlInput(e.target.value)} />
           {parsedUrl && (
-            <div style={{ marginTop: 10, fontSize: ".76rem", display: "grid", gap: 4 }}>
-              <div><span style={{ color: "var(--text-muted)", width: 80, display: "inline-block" }}>Hostname</span><span style={{ fontFamily: "var(--font-mono)" }}>{parsedUrl.hostname}</span></div>
-              <div><span style={{ color: "var(--text-muted)", width: 80, display: "inline-block" }}>Path</span><span style={{ fontFamily: "var(--font-mono)" }}>{parsedUrl.pathname}</span></div>
-              <div><span style={{ color: "var(--text-muted)", width: 80, display: "inline-block" }}>Stack</span><span style={{ fontFamily: "var(--font-mono)" }}>{parsedUrl.stack}</span></div>
+            <div className="inspector-grid">
+              <div><span className="inspector-label">Hostname</span><span className="text-mono">{parsedUrl.hostname}</span></div>
+              <div><span className="inspector-label">Path</span><span className="text-mono">{parsedUrl.pathname}</span></div>
+              <div><span className="inspector-label">Stack</span><span className="text-mono">{parsedUrl.stack}</span></div>
               {parsedUrl.params.length > 0 && (
                 <div>
                   <span style={{ color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Query params</span>
@@ -120,11 +119,10 @@ export function UtilitiesView() {
         </div>
       </div>
 
-      {/* Cache management */}
       <div className="card">
-        <div className="card-header"><span className="card-title">🗑 Cache Management</span></div>
-        <div className="card-body" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {(["journeys","automations","errors"] as const).map(k => (
+        <div className="card-header"><span className="card-title">Cache Management</span></div>
+        <div className="card-body button-row-wrap">
+          {(["journeys", "automations", "errors"] as const).map(k => (
             <Button key={k} variant="ghost" size="sm" onClick={() => purgeCache(k)}>Clear {k}</Button>
           ))}
           <Button variant="danger" size="sm" onClick={() => purgeCache("all")}>Clear all cache</Button>

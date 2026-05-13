@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "SFMC Buddy",
+  "name": "Sezane Monitoring",
   "version": "2.1.0",
   "description": "Professional SFMC monitoring, Journey process mining, local inventory, SQL utilities, and DevTools network capture.",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "tabs",
     "activeTab",
     "scripting",
@@ -53,8 +54,8 @@
     }
   ],
   "action": {
-    "default_title": "SFMC Process Miner",
-    "default_popup": "popup.html",
+    "default_title": "Sezane Monitoring",
+    "default_popup": "legacy-popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

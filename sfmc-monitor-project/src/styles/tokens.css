@@ -61,8 +61,8 @@
   --shadow-focus: 0 0 0 3px var(--brand-glow);
 
   /* ── Typography ──────────────────────────────────────── */
-  --font-body: Inter, "SF Pro Text", system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, Consolas, monospace;
+  --font-body: "Manrope", "SF Pro Text", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", "Fira Code", ui-monospace, Consolas, monospace;
 
   /* ── Radius ──────────────────────────────────────────── */
   --radius-sm: 5px;

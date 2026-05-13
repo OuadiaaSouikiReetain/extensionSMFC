@@ -231,6 +231,24 @@ async function findCookieTabCandidates(url, preferredTabId) {
 }
 
 async function executeFetchInTab(tabId, url, method, body) {
+  try {
+    const payload = await chrome.tabs.sendMessage(tabId, {
+      type: "SFMC_BUDDY_FETCH_JSON",
+      url
+    });
+    if (payload && !payload.error) {
+      let data;
+      try { data = JSON.parse(payload.text); } catch { data = { raw: payload.text }; }
+      if (!payload.ok) {
+        storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: payload.status, message: String(payload.text || "").slice(0, 500), capturedAt: Date.now() });
+        throw new Error(`HTTP ${payload.status}: ${String(payload.text || "").slice(0, 180)}`);
+      }
+      return { ok: true, data, status: payload.status };
+    }
+  } catch (error) {
+    // Fall back to script injection when the content-script bridge is unavailable.
+  }
+
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -544,7 +562,7 @@ function mergeItems(existing, incoming) {
 }
 
 function notify(title, message) {
-  try { chrome.notifications.create({ type: "basic", iconUrl: "icons/icon48.png", title: `SFMC Buddy — ${title}`, message: String(message || "").slice(0, 180) }); } catch { /* ignore */ }
+  try { chrome.notifications.create({ type: "basic", iconUrl: "icons/icon48.png", title: `Sezane Monitoring - ${title}`, message: String(message || "").slice(0, 180) }); } catch { /* ignore */ }
 }
 
 function sanitizeHostPath(rawUrl) { try { const url = new URL(rawUrl); return `${url.hostname}${url.pathname}`; } catch { return String(rawUrl || "").slice(0, 160); } }

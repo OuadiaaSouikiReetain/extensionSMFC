@@ -178,7 +178,7 @@ export function JourneyDetailApp() {
           {activeTab === "overview" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
               {/* KPI row */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+              <div className="responsive-grid-4">
                 {[
                   { label: "Entries",    value: fmtNum(journey.entryCount) },
                   { label: "Goals Met",  value: fmtNum(journey.goalCount) },
@@ -193,7 +193,7 @@ export function JourneyDetailApp() {
               </div>
 
               {/* Rate row */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+              <div className="responsive-grid-3">
                 {[
                   { label: "Open Rate",  value: openRate },
                   { label: "Click Rate", value: clickRate },
@@ -210,21 +210,23 @@ export function JourneyDetailApp() {
               <div className="card">
                 <div className="card-header"><span className="card-title">Journey Info</span></div>
                 <div className="card-body">
-                  <table style={{ width: "100%", fontSize: ".8rem", borderCollapse: "collapse" }}>
-                    <tbody>
-                      {[
-                        ["ID",       journey.id],
-                        ["Created",  fmtDate(journey.createdDate)],
-                        ["Modified", fmtDate(journey.modifiedDate)],
-                        ["Description", journey.description ?? "—"],
-                      ].map(([k, v]) => (
-                        <tr key={k} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-                          <td style={{ padding: "6px 8px", color: "var(--text-muted)", width: 120 }}>{k}</td>
-                          <td style={{ padding: "6px 8px", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{v}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <div className="table-scroll">
+                    <table style={{ width: "100%", fontSize: ".8rem", borderCollapse: "collapse", minWidth: 420 }}>
+                      <tbody>
+                        {[
+                          ["ID",       journey.id],
+                          ["Created",  fmtDate(journey.createdDate)],
+                          ["Modified", fmtDate(journey.modifiedDate)],
+                          ["Description", journey.description ?? "—"],
+                        ].map(([k, v]) => (
+                          <tr key={k} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+                            <td style={{ padding: "6px 8px", color: "var(--text-muted)", width: 120 }}>{k}</td>
+                            <td style={{ padding: "6px 8px", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{v}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </div>
@@ -235,7 +237,8 @@ export function JourneyDetailApp() {
             <div className="card">
               <div className="card-header"><span className="card-title">Activities ({journey.activities.length})</span></div>
               <div className="card-body" style={{ padding: 0 }}>
-                <table style={{ width: "100%", fontSize: ".78rem", borderCollapse: "collapse" }}>
+                <div className="table-scroll">
+                  <table style={{ width: "100%", minWidth: 720, fontSize: ".78rem", borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ background: "var(--bg-elevated)" }}>
                       {["Name", "Type", "Sent", "Opens", "Clicks", "Bounces", "Exits"].map(h => (
@@ -259,7 +262,8 @@ export function JourneyDetailApp() {
                       <tr><td colSpan={7} style={{ padding: 20, textAlign: "center", color: "var(--text-muted)" }}>No activities found.</td></tr>
                     )}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             </div>
           )}
@@ -276,7 +280,8 @@ export function JourneyDetailApp() {
                 </div>
               </div>
               <div className="card-body" style={{ padding: 0 }}>
-                <table style={{ width: "100%", fontSize: ".75rem", borderCollapse: "collapse" }}>
+                <div className="table-scroll">
+                  <table style={{ width: "100%", minWidth: 720, fontSize: ".75rem", borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ background: "var(--bg-elevated)" }}>
                       {["Time", "Method", "Status", "URL"].map(h => (
@@ -297,7 +302,8 @@ export function JourneyDetailApp() {
                       <tr><td colSpan={4} style={{ padding: 20, textAlign: "center", color: "var(--text-muted)" }}>No network activity captured yet.</td></tr>
                     )}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             </div>
           )}

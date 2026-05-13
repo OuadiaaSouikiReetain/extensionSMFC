@@ -1,8 +1,8 @@
 chrome.devtools.panels.create(
-  "SFMC Process Miner",
+  "Sezane Monitoring",
   "icons/icon48.png",
   "panel.html",
   panel => {
-    console.log("[SFMC Buddy] DevTools panel created", panel);
+    console.log("[Sezane Monitoring] DevTools panel created", panel);
   }
 );

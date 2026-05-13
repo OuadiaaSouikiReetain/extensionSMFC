@@ -3,13 +3,15 @@ import { useAppStore } from "../store/appStore";
 import { Sidebar } from "../components/layout/Sidebar";
 import { DashboardView } from "../components/popup/views/DashboardView";
 import { CollectionView } from "../components/popup/views/CollectionView";
+import { DetailView } from "../components/popup/views/DetailView";
+import { AnalyticsView } from "../components/popup/views/AnalyticsView";
 import { JourneyHistoryView } from "../components/popup/views/JourneyHistoryView";
 import { StorageMinerView } from "../components/popup/views/StorageMinerView";
 import { SettingsView } from "../components/popup/views/SettingsView";
 import { UtilitiesView } from "../components/popup/views/UtilitiesView";
 
 function DebugLog() {
-  const logs = useAppStore(s => s.logs);
+  const logs = useAppStore((state) => state.logs);
   if (!logs.length) return null;
   return (
     <div style={{ borderTop: "1px solid var(--border-subtle)", background: "var(--bg-elevated)" }}>
@@ -21,32 +23,47 @@ function DebugLog() {
 export function PopupApp() {
   const { activeView, loadAll } = useAppStore();
 
-  useEffect(() => { loadAll(); }, []);
+  useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
 
   const view = (() => {
     switch (activeView) {
-      case "dashboard":       return <DashboardView />;
-      case "collection":      return <CollectionView />;
-      case "journey-history": return <JourneyHistoryView />;
-      case "storage-miner":   return <StorageMinerView />;
-      case "settings":        return <SettingsView />;
-      case "utilities":       return <UtilitiesView />;
-      default:                return <DashboardView />;
+      case "dashboard":
+        return <DashboardView />;
+      case "collection":
+        return <CollectionView />;
+      case "detail":
+        return <DetailView />;
+      case "analytics":
+        return <AnalyticsView />;
+      case "journey-history":
+        return <JourneyHistoryView />;
+      case "storage-miner":
+        return <StorageMinerView />;
+      case "settings":
+        return <SettingsView />;
+      case "utilities":
+        return <UtilitiesView />;
+      default:
+        return <DashboardView />;
     }
   })();
+
+  const chromeHandledView = activeView === "collection" || activeView === "detail" || activeView === "journey-history";
 
   return (
     <div className="buddy-shell">
       <Sidebar />
       <div className="buddy-main">
-        {activeView !== "collection" && activeView !== "journey-history" && (
+        {!chromeHandledView ? (
           <div className="buddy-topbar">
             <div>
-              <div className="topbar-eyebrow">SFMC Buddy</div>
+              <div className="topbar-eyebrow">Sezane Monitoring</div>
               <div className="topbar-title">{viewTitle(activeView)}</div>
             </div>
           </div>
-        )}
+        ) : null}
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
           {view}
         </div>
@@ -56,10 +73,16 @@ export function PopupApp() {
   );
 }
 
-function viewTitle(v: string): string {
+function viewTitle(view: string): string {
   const map: Record<string, string> = {
-    dashboard: "Dashboard", collection: "Collection", "journey-history": "Journey History",
-    "storage-miner": "Storage Insights", settings: "Settings", utilities: "Utilities", analytics: "Analytics",
+    dashboard: "Dashboard",
+    collection: "Collection",
+    detail: "Details",
+    analytics: "Analytics",
+    "journey-history": "Journey History",
+    "storage-miner": "Storage Insights",
+    settings: "Settings",
+    utilities: "Utilities",
   };
-  return map[v] ?? v;
+  return map[view] ?? view;
 }

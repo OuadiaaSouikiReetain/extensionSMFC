@@ -3,15 +3,45 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SFMC Buddy</title>
-  <style>body { margin: 0; }</style>
-  <script type="module" crossorigin src="/popup.js"></script>
-  <link rel="modulepreload" crossorigin href="/chunks/index-Db09ZESV.js">
-  <link rel="modulepreload" crossorigin href="/chunks/EmptyState-C5yCcl2T.js">
-  <link rel="modulepreload" crossorigin href="/chunks/Button-CKkQViN1.js">
-  <link rel="stylesheet" crossorigin href="/assets/index.css">
+  <title>Sezane Monitoring</title>
+  <style>
+    html, body {
+      margin: 0;
+      min-width: 960px;
+      min-height: 720px;
+      background: #f4f8fc;
+    }
+
+    #root {
+      min-width: 960px;
+      min-height: 720px;
+    }
+
+    #boot-fallback {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
+      color: #10203b;
+      font: 600 14px/1.6 system-ui, sans-serif;
+      text-align: center;
+    }
+
+    #boot-fallback[hidden] {
+      display: none;
+    }
+  </style>
+  <script type="module" crossorigin src="./popup.js"></script>
+  <link rel="modulepreload" crossorigin href="./chunks/index-Db09ZESV.js">
+  <link rel="modulepreload" crossorigin href="./chunks/EmptyState-Bb_uUMq1.js">
+  <link rel="modulepreload" crossorigin href="./chunks/Button-CKkQViN1.js">
+  <link rel="stylesheet" crossorigin href="./assets/index.css">
 </head>
 <body>
   <div id="root"></div>
+  <div id="boot-fallback">Loading Sezane Monitoring...</div>
 </body>
 </html>
