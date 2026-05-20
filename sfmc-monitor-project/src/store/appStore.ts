@@ -60,6 +60,8 @@ interface AppStore {
   exportSnapshot: () => object;
   importSnapshot: (data: unknown) => Promise<void>;
   searchJourneyHistory: (req: JourneyHistorySearchRequest) => Promise<void>;
+  fetchJourneyDetail: (journeyId: string, version?: number | null) => Promise<void>;
+  fetchAutomationDetail: (automationId: string) => Promise<void>;
 }
 
 function emptyCache(): Record<CollectionKey, CachedItem[]> {
@@ -71,9 +73,16 @@ function addLogLine(logs: string[], line: string): string[] {
   return [...logs, `[${ts}] ${line}`].slice(-120);
 }
 
-async function fetchSfmc(url: string, tabId?: number): Promise<unknown> {
-  const res = await chrome.runtime.sendMessage({ type: "FETCH_SFMC", url, tabId });
+async function fetchSfmc(url: string, tabId?: number, silent?: boolean): Promise<unknown> {
+  const res = await chrome.runtime.sendMessage({ type: "FETCH_SFMC", url, tabId, silent: !!silent });
   if (!res?.ok) throw new Error(res?.error || "Fetch failed");
+  return res.data;
+}
+
+
+async function fetchSfmcJb(url: string, tabId?: number, silent?: boolean): Promise<unknown> {
+  const res = await chrome.runtime.sendMessage({ type: "FETCH_SFMC_JB", url, tabId, silent: !!silent });
+  if (!res?.ok) throw new Error(res?.error || "JB fetch failed");
   return res.data;
 }
 
@@ -101,8 +110,14 @@ function isSfmcUrl(url: string): boolean {
 }
 
 function normalizeJourneyItem(item: Record<string, unknown>): CachedItem {
+  const rawStats = item.stats && typeof item.stats === "object"
+    ? item.stats as Record<string, unknown>
+    : null;
+  const rawCumPop = rawStats?.cumulativePopulation ?? item.cumulativePopulation;
+  const cumPop = Number(rawCumPop);
   return {
     id: String(item.id || item.definitionId || item.key || ""),
+    definitionId: item.definitionId ? String(item.definitionId) : null,
     key: String(item.key || item.definitionKey || item.id || ""),
     name: String(item.name || item.journeyName || item.key || "Untitled"),
     status: String(item.status || item.scheduledStatus || "Unknown"),
@@ -111,6 +126,7 @@ function normalizeJourneyItem(item: Record<string, unknown>): CachedItem {
     categoryId: item.categoryId || null,
     modifiedDate: item.modifiedDate || null,
     lastPublishedDate: item.lastPublishedDate || null,
+    ...(Number.isFinite(cumPop) ? { stats: { cumulativePopulation: cumPop }, cumulativePopulation: cumPop } : {}),
     capturedAt: Date.now(),
   };
 }
@@ -213,6 +229,9 @@ function extractArray(data: unknown): Record<string, unknown>[] {
     source.entry,
     source.results,
     source.data,
+    source.list,       // Fuel3 history response: { list: [...], count: N }
+    source.history,    // Some endpoints use "history" key
+    source.runs,       // Some endpoints use "runs" key
     source.interactions,
     source.objects,
     source.records,
@@ -414,12 +433,39 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
       await sync("journeys", async () => {
         const urls = [
+          `${classicBase}/cloud/fuelapi/interaction/v1/interactions?extras=counters`,
+          `${classicBase}/cloud/fuelapi/interaction/v1/interactions?extras=all`,
+          `${journeyBase}/fuelapi/interaction/v1/interactions?extras=counters`,
           `${classicBase}/cloud/fuelapi/interaction/v1/interactions`,
           `${journeyBase}/fuelapi/interaction/v1/interactions`,
           `${classicBase}/cloud/fuelapi/interaction/v1/interactions?mostRecentVersionOnly=false&mostRecentVersionOrRunningOnly=true`,
           `${journeyBase}/fuelapi/interaction/v1/interactions?mostRecentVersionOnly=false&mostRecentVersionOrRunningOnly=true`,
         ];
-        return fetchFromCandidates(urls, pageSize, tabId, normalizeJourneyItem);
+        const freshItems = await fetchFromCandidates(urls, pageSize, tabId, normalizeJourneyItem);
+        // Preserve allVersions, activities and contact counts from previous detail fetches —
+        // the list API does not return stats so we must not wipe data populated by fetchJourneyDetail.
+        const prevJourneys = cache["journeys"];
+        return freshItems.map(item => {
+          const prev = prevJourneys.find(p => String(p.id) === String(item.id)) as Record<string, unknown> | undefined;
+          if (!prev) return item;
+          const existingCum = Math.max(
+            Number((prev.stats as Record<string, unknown> | undefined)?.cumulativePopulation ?? 0),
+            Number(prev.cumulativePopulation ?? 0),
+            Number((prev.allVersions as Array<{ cumulativePopulation: number }> | undefined)
+              ?.reduce((m, v) => Math.max(m, v.cumulativePopulation || 0), 0) ?? 0)
+          );
+          const freshCum = Math.max(
+            Number((item.stats as Record<string, unknown> | undefined)?.cumulativePopulation ?? 0),
+            Number(item.cumulativePopulation ?? 0)
+          );
+          const bestCum = Math.max(existingCum, freshCum);
+          return {
+            ...item,
+            ...(prev.allVersions ? { allVersions: prev.allVersions } : {}),
+            ...(prev.activities ? { activities: prev.activities } : {}),
+            ...(bestCum > 0 ? { stats: { cumulativePopulation: bestCum }, cumulativePopulation: bestCum } : {}),
+          };
+        });
       });
 
       await sync("automations", async () => {
@@ -544,6 +590,706 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (error: unknown) {
       get().addLog(`Import failed: ${(error as Error).message}`);
     }
+  },
+
+  fetchJourneyDetail: async (journeyId, version) => {
+    const { activeTab, addLog, cache } = get();
+    if (!activeTab?.id || !activeTab.url || !isSfmcUrl(activeTab.url)) {
+      addLog("No active SFMC tab — open SFMC first.");
+      return;
+    }
+    const stack = getStack(activeTab.url);
+    if (!stack) { addLog("Cannot detect SFMC stack."); return; }
+
+    const tabId = activeTab.id;
+    const base = `https://mc.${stack}.exacttarget.com/cloud/fuelapi`;
+
+    // ── Step 1: check hook-captured data from jbinteractions XHR interception ──
+    // Always re-fetch tabState fresh from the service worker so we see the most
+    // recent XHR-intercepted data even if it arrived after the popup was opened.
+    let freshTabState = get().tabState;
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "PANEL_GET_STATE", tabId });
+      if (res?.state) {
+        freshTabState = res.state;
+        set({ tabState: freshTabState });
+      }
+    } catch { /* use cached tabState */ }
+
+    // Collect all versioned hook captures (background stores {id}_v{n} for each captured version).
+    // We scan v1–v20; empty slots are silently skipped.
+    const hookVersionedEntries: Record<string, unknown>[] = [];
+    for (let v = 20; v >= 1; v--) {
+      const hv = freshTabState?.journeys?.[`${journeyId}_v${v}`] as Record<string, unknown> | undefined;
+      if (hv?.id) hookVersionedEntries.push(hv);
+    }
+
+    // Pick the best hook journey to show:
+    // - If a specific version was requested, prefer that version's hook data
+    // - Otherwise prefer the version with the highest cumulativePopulation
+    const pickHookJourney = (): Record<string, unknown> | undefined => {
+      if (version != null) {
+        return (freshTabState?.journeys?.[`${journeyId}_v${version}`] as Record<string, unknown> | undefined)
+          || (freshTabState?.journeys?.[journeyId] as Record<string, unknown> | undefined);
+      }
+      const withContacts = hookVersionedEntries.find(h =>
+        Number((h.stats as Record<string, unknown> | undefined)?.cumulativePopulation) > 0
+      );
+      return withContacts || (freshTabState?.journeys?.[journeyId] as Record<string, unknown> | undefined);
+    };
+
+    const hookJourney = pickHookJourney();
+    const hookActivities: Record<string,unknown>[] = Array.isArray(hookJourney?.activities)
+      ? hookJourney!.activities as Record<string,unknown>[]
+      : [];
+    const hookStats = hookJourney?.stats && typeof hookJourney.stats === "object"
+      ? hookJourney.stats as Record<string,unknown>
+      : null;
+    const hookCumPop = Number(hookStats?.cumulativePopulation ?? 0);
+    const hookHasStats = hookActivities.some(a => {
+      const m = a.metaData as Record<string,unknown> | undefined;
+      const cnt = a.counters as Record<string,unknown> | undefined;
+      const cntEntered = (cnt?.entered as Record<string,unknown> | undefined)?.count;
+      const s = a.stats as Record<string,unknown> | undefined;
+      return Number(m?.statsContactsIn) > 0 || Number(m?.contactsIn) > 0
+        || Number(s?.contactsIn) > 0 || Number(s?.entered) > 0
+        || Number(cntEntered) > 0;
+    });
+
+    // Build allVersions from versioned hook captures (so the version picker is populated even on early return).
+    const hookAllVersions = hookVersionedEntries
+      .map(h => ({
+        version: Number(h.version) || null,
+        status: String(h.status || ""),
+        cumulativePopulation: Number((h.stats as Record<string, unknown> | undefined)?.cumulativePopulation ?? 0),
+        lastPublishedDate: String(h.lastPublishedDate || ""),
+      }))
+      .filter(h => h.version !== null)
+      .sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
+
+    if (hookActivities.length > 0 && (hookCumPop > 0 || hookHasStats)) {
+      addLog(`Journey ${journeyId}: using hook-captured data (v${hookJourney!.version}, ${hookCumPop} contacts).`);
+      const existing = get().cache["journeys"].find(j => String(j.id) === journeyId)
+        || cache["journeys"].find(j => String(j.id) === journeyId)
+        || {};
+      // Merge hook-derived version list with what's already cached — never discard known versions.
+      type VersionEntry = { version: number | null; status: string; cumulativePopulation: number; lastPublishedDate?: string };
+      const existingAllVersions = ((existing as Record<string,unknown>).allVersions as VersionEntry[] | undefined) || [];
+      const hookVerMap = new Map<number, VersionEntry>();
+      for (const v of existingAllVersions) { if (v.version !== null) hookVerMap.set(v.version, v); }
+      for (const v of hookAllVersions) {
+        if (v.version === null) continue;
+        const prev = hookVerMap.get(v.version);
+        hookVerMap.set(v.version, { ...v, cumulativePopulation: Math.max(v.cumulativePopulation, prev?.cumulativePopulation ?? 0) });
+      }
+      const mergedAllVersions = [...hookVerMap.values()].sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
+      const exStep1 = existing as Record<string, unknown>;
+      const existingCumPopStep1 = Math.max(
+        Number(exStep1?.stats?.cumulativePopulation ?? 0),
+        Number(exStep1?.cumulativePopulation ?? 0),
+        Number((exStep1.allVersions as Array<{cumulativePopulation:number}> | undefined)
+          ?.reduce((m, v) => Math.max(m, v.cumulativePopulation || 0), 0) ?? 0)
+      );
+      const bestCumPopStep1 = Math.max(hookCumPop, existingCumPopStep1);
+      const hookStatsMerged = bestCumPopStep1 > hookCumPop
+        ? { ...(hookStats || {}), cumulativePopulation: bestCumPopStep1 }
+        : (hookStats || {});
+      const existingActivitiesStep1 = ((existing as Record<string,unknown>).activities as Record<string,unknown>[] | undefined) || [];
+      const finalActivitiesStep1 = hookActivities.length > 0 ? hookActivities : existingActivitiesStep1;
+      addLog(`Step1 hook: ${hookActivities.length} hook acts, ${existingActivitiesStep1.length} cached acts → writing ${finalActivitiesStep1.length}.`);
+      const merged = {
+        ...existing,
+        ...(hookJourney as Record<string,unknown>),
+        id: journeyId,
+        activities: finalActivitiesStep1,
+        stats: hookStatsMerged,
+        goals: Array.isArray(hookJourney!.goals) ? hookJourney!.goals : (existing as Record<string,unknown>).goals || [],
+        allVersions: mergedAllVersions,
+        raw: hookJourney!.raw ?? hookJourney,
+        capturedAt: Date.now(),
+      } as import("./types").CachedItem;
+
+      const newCache = { ...cache };
+      const idx = newCache["journeys"].findIndex(j => String(j.id) === journeyId);
+      if (idx >= 0) newCache["journeys"] = newCache["journeys"].map((j, i) => i === idx ? merged : j);
+      else newCache["journeys"] = [merged, ...newCache["journeys"]];
+
+      const updatedAt = { ...get().updatedAt, journeys: Date.now() };
+      await chrome.storage.local.set({ sfmcBuddyCache: { cache: newCache, updatedAt, savedAt: Date.now() } });
+      set({ cache: newCache, updatedAt });
+      return;
+    }
+
+    // ── Step 2: fetch from mc.exacttarget.com/cloud/fuelapi ───────────────────
+    // SFMC Journey API has TWO different IDs:
+    //   id          — the URL identifier used to GET a specific journey
+    //   definitionId — the journey-definition UUID shared across ALL versions
+    // ?version=N ONLY works with the definitionId, not with the version-instance id.
+    // We check the cache for the stored definitionId, fall back to journeyId.
+    const existingForDefId = cache["journeys"].find(j => String(j.id) === journeyId);
+    const knownDefId = String(
+      (existingForDefId as Record<string,unknown>)?.definitionId ||
+      journeyId
+    );
+
+    // jbinteractions returns full stats (cumulativePopulation, activity counters).
+    // The mc.exacttarget.com proxy does not. Always try jbinteractions first.
+    // NOTE: jbBase already includes /fuelapi — do NOT add /fuelapi again in URLs.
+    const jbBase = `https://jbinteractions.${stack}.marketingcloudapps.com/fuelapi`;
+    // Valid SFMC extras: activities, counters, goals, tags — "all" is NOT valid.
+    const jbUrlsToTry = version != null
+      ? [
+          `${jbBase}/interaction/v1/interactions/${journeyId}?version=${version}&extras=activities,counters,goals`,
+          `${jbBase}/interaction/v1/interactions/${journeyId}?version=${version}&extras=activities,counters`,
+          `${jbBase}/interaction/v1/interactions/${journeyId}?version=${version}`,
+        ]
+      : [
+          `${jbBase}/interaction/v1/interactions/${journeyId}?extras=activities,counters,goals`,
+          `${jbBase}/interaction/v1/interactions/${journeyId}?extras=activities,counters`,
+          `${jbBase}/interaction/v1/interactions/${journeyId}`,
+        ];
+    const proxyUrlsToTry = version != null
+      ? [
+          `${base}/interaction/v1/interactions/${journeyId}?version=${version}&extras=activities,counters`,
+          `${base}/interaction/v1/interactions/${journeyId}?version=${version}`,
+        ]
+      : [
+          `${base}/interaction/v1/interactions/${journeyId}?extras=activities,counters,goals`,
+          `${base}/interaction/v1/interactions/${journeyId}?extras=activities,counters`,
+          `${base}/interaction/v1/interactions/${journeyId}`,
+        ];
+
+    addLog(`Fetching journey detail: ${journeyId}${version != null ? ` v${version}` : ""}…`);
+    let detail: Record<string, unknown> | null = null;
+
+    // Try jbinteractions first — it returns real contact stats.
+    for (const url of jbUrlsToTry) {
+      try {
+        const data = await fetchSfmcJb(url, tabId);
+        if (data && typeof data === "object") {
+          const d = data as Record<string, unknown>;
+          if (d.id) {
+            detail = d;
+            if (Array.isArray(d.activities) && (d.activities as unknown[]).length > 0) break;
+          }
+        }
+      } catch { /* fall through to proxy */ }
+    }
+    // Fall back to proxy if jbinteractions returned nothing OR returned a detail without activities.
+    for (const url of proxyUrlsToTry) {
+      // Skip proxy only if jbinteractions already gave us activities
+      const jbHasActs = detail && Array.isArray(detail.activities) && (detail.activities as unknown[]).length > 0;
+      if (jbHasActs) break;
+      try {
+        const data = await fetchSfmc(url, tabId);
+        if (data && typeof data === "object") {
+          const d = data as Record<string, unknown>;
+          if (d.id) {
+            const hasActs = Array.isArray(d.activities) && (d.activities as unknown[]).length > 0;
+            const st = d.stats as Record<string,unknown> | undefined;
+            const hasCum = Number(st?.cumulativePopulation ?? 0) > 0;
+            if (!detail) detail = d;
+            if (hasActs) { detail = d; if (hasCum) break; }
+          }
+        }
+      } catch { /* try next url */ }
+    }
+
+    if (!detail) { addLog(`Journey detail fetch failed for ${journeyId}.`); return; }
+
+    const activities: Record<string, unknown>[] = Array.isArray(detail.activities)
+      ? (detail.activities as Record<string, unknown>[])
+      : [];
+    addLog(`Detail fetched: ${activities.length} activities, id=${String(detail.id || "?").slice(0,8)}…`);
+    const detailVersion = detail.version;
+    const detailStatus  = String(detail.status || detail.scheduledStatus || "");
+    const st = detail.stats as Record<string,unknown> | undefined;
+    const cumPop = Number(st?.cumulativePopulation ?? 0);
+
+    // Update definitionId now that we have the full detail response
+    const detailDefId = detail.definitionId ? String(detail.definitionId) : null;
+    const effectiveDefId = detailDefId || knownDefId;
+
+    // ── Fetch real cumulativePopulation from jbinteractions LIST endpoint ─────
+    // The detail endpoint (/interactions/{id}) always returns cumulativePopulation=0.
+    // The LIST endpoint with ?extras=counters returns the real cumulative count.
+    // IMPORTANT: ?definitionId={id} is always the correct query — even when definitionId==id.
+    // Do NOT use detail.key (the customerKey) here; that's a different field.
+    let jbListCumPop = 0;
+    const jbListUrlsForCumPop: string[] = [
+      // Primary: definitionId query — works for all journeys (single or multi-version)
+      `${jbBase}/interaction/v1/interactions?definitionId=${effectiveDefId}&extras=counters&mostRecentVersionOnly=false&$pageSize=50`,
+      // Fallback: direct ID lookup
+      `${jbBase}/interaction/v1/interactions?id=${journeyId}&extras=counters&mostRecentVersionOnly=false&$pageSize=50`,
+      // Proxy fallback if jbinteractions is unavailable
+      `${base}/interaction/v1/interactions?definitionId=${effectiveDefId}&extras=counters&mostRecentVersionOnly=false&$pageSize=50`,
+    ];
+    for (const jbListUrl of jbListUrlsForCumPop) {
+      if (jbListCumPop > 0) break;
+      const isJb = jbListUrl.startsWith(jbBase);
+      try {
+        const jbListData = (isJb
+          ? await fetchSfmcJb(jbListUrl, tabId)
+          : await fetchSfmc(jbListUrl, tabId)) as Record<string, unknown>;
+        const jbListItems = extractArray(jbListData);
+        for (const li of jbListItems) {
+          const liId = String(li.id || "");
+          const liDefId = String(li.definitionId || "");
+          // Match if this list item belongs to our journey (by id or definitionId)
+          if (liId !== journeyId && liDefId !== effectiveDefId && liId !== effectiveDefId) continue;
+          const liSt = li.stats as Record<string, unknown> | undefined;
+          const liCum = Number(liSt?.cumulativePopulation ?? li.cumulativePopulation ?? 0);
+          if (liCum > jbListCumPop) jbListCumPop = liCum;
+        }
+        if (jbListCumPop > 0) addLog(`List extras=counters: ${jbListCumPop} contacts (${isJb ? "jb" : "proxy"}).`);
+      } catch { /* silently skip */ }
+    }
+
+    addLog(`Journey v${detailVersion} (${detailStatus}): ${activities.length} activities, ${Math.max(cumPop, jbListCumPop)} contacts. defId=${effectiveDefId.slice(0,8)}…`);
+
+    // Per-version explicit fetch: build allVersions list without changing the displayed version.
+    // Always use journeyId (not definitionId) in the URL path — definitionId causes 30003 errors.
+    // Dedup by the returned version number: if the proxy ignores ?version=, the same version comes back
+    // every time and we break early, so we never show duplicates.
+    const seenVersionNums = new Set<number>();
+    const allVersionsList: Array<{ version: number | null; status: string; cumulativePopulation: number; lastPublishedDate?: string }> = [];
+    const currentVerNum = Number(detailVersion) || 1;
+    seenVersionNums.add(currentVerNum);
+    allVersionsList.push({
+      version: currentVerNum,
+      status: detailStatus,
+      cumulativePopulation: Math.max(cumPop, jbListCumPop),
+      lastPublishedDate: String(detail.lastPublishedDate || ""),
+    });
+
+    if (version == null) {
+      for (let v = currentVerNum - 1; v >= 1; v--) {
+        try {
+          const vd = await fetchSfmc(
+            `${base}/interaction/v1/interactions/${journeyId}?version=${v}&extras=activities,counters`,
+            tabId
+          ) as Record<string, unknown>;
+          if (!vd?.id) continue;
+          const vVer = Number(vd.version) || v;
+          if (seenVersionNums.has(vVer)) break; // proxy returned same version → no older versions exist
+          seenVersionNums.add(vVer);
+          const vSt = vd.stats as Record<string, unknown> | undefined;
+          const vCum = Number(vSt?.cumulativePopulation ?? 0);
+          const vStatus = String(vd.status || vd.scheduledStatus || "");
+          allVersionsList.push({
+            version: vVer,
+            status: vStatus,
+            cumulativePopulation: vCum,
+            lastPublishedDate: String(vd.lastPublishedDate || ""),
+          });
+          addLog(`Found v${vVer} (${vStatus}): ${vCum} contacts.`);
+        } catch { break; }
+      }
+    }
+
+    // Supplemental: use definitionId list query to find versions not reached by the count-down loop above.
+    if (version == null) {
+      const suppDefId = effectiveDefId;
+      try {
+        const listData = await fetchSfmc(
+          `${base}/interaction/v1/interactions?definitionId=${suppDefId}&mostRecentVersionOnly=false&$pageSize=50&extras=counters`,
+          tabId
+        ) as Record<string, unknown>;
+        const listItems = extractArray(listData);
+        for (const li of listItems) {
+          const liVer = Number(li.version) || null;
+          if (liVer === null || seenVersionNums.has(liVer)) continue;
+          seenVersionNums.add(liVer);
+          const liSt = li.stats as Record<string, unknown> | undefined;
+          const liCum = Number(liSt?.cumulativePopulation ?? 0);
+          allVersionsList.push({
+            version: liVer,
+            status: String(li.status || li.scheduledStatus || ""),
+            cumulativePopulation: liCum,
+            lastPublishedDate: String(li.lastPublishedDate || ""),
+          });
+        }
+        if (listItems.length > 0) addLog(`List API found ${listItems.length} version entry(ies) for this journey.`);
+      } catch { /* supplemental only — ignore errors */ }
+    }
+
+    // ── Step A: enrich activity-level stats (counters / currentPopulation) ──────
+    // Strategy: re-fetch the journey with extras=activities,counters from both
+    // jbinteractions and the proxy, then merge any counters/stats into our activities.
+    // We also try the SFMC statistics endpoint which some orgs expose.
+    const alreadyHasCounters = activities.some(a => {
+      const cnt = a.counters as Record<string,unknown> | undefined;
+      return cnt && Object.keys(cnt).length > 0;
+    });
+    if (!alreadyHasCounters && activities.length > 0) {
+      const statsSourceUrls: Array<{ url: string; useJb: boolean }> = [
+        { url: `${jbBase}/interaction/v1/interactions/${journeyId}?extras=activities,counters`, useJb: true },
+        { url: `${base}/interaction/v1/interactions/${journeyId}?extras=activities,counters`, useJb: false },
+        ...(version != null ? [
+          { url: `${jbBase}/interaction/v1/interactions/${journeyId}?version=${version}&extras=activities,counters`, useJb: true },
+          { url: `${base}/interaction/v1/interactions/${journeyId}?version=${version}&extras=activities,counters`, useJb: false },
+        ] : []),
+      ];
+      for (const { url: statsUrl, useJb } of statsSourceUrls) {
+        try {
+          const statsData = (useJb
+            ? await fetchSfmcJb(statsUrl, tabId)
+            : await fetchSfmc(statsUrl, tabId)) as Record<string, unknown>;
+          const richActivities: Record<string,unknown>[] = Array.isArray(statsData?.activities)
+            ? statsData.activities as Record<string,unknown>[]
+            : extractArray(statsData).filter(a => (a as Record<string,unknown>).key);
+          if (richActivities.length > 0) {
+            const statsMap = new Map(richActivities.map(a => [String(a.key || a.activityKey || ""), a]));
+            let merged = 0;
+            for (const act of activities) {
+              const s = statsMap.get(String(act.key || ""));
+              if (!s) continue;
+              if (s.counters) act.counters = s.counters;
+              if (s.stats && typeof s.stats === "object") {
+                act.stats = { ...(act.stats as Record<string,unknown> || {}), ...(s.stats as Record<string,unknown>) };
+              }
+              if (s.currentPopulation !== undefined) {
+                act.stats = { ...(act.stats as Record<string,unknown> || {}), currentPopulation: s.currentPopulation };
+              }
+              merged++;
+            }
+            if (merged > 0) {
+              addLog(`Activity counters enriched for ${merged} activities (${useJb ? "jb" : "proxy"}).`);
+              // Dump counter keys for email activities so we can see what's available
+              for (const act of activities) {
+                if (!/EMAIL/i.test(String(act.type || ""))) continue;
+                const cnt = act.counters as Record<string,unknown> | undefined;
+                const st = act.stats as Record<string,unknown> | undefined;
+                const cntKeys = cnt ? Object.keys(cnt).join(",") : "none";
+                const stKeys = st ? Object.keys(st).join(",") : "none";
+                addLog(`Email "${String(act.name||act.key)}" counters: [${cntKeys}] stats: [${stKeys}]`);
+              }
+              break;
+            }
+          }
+        } catch { /* not available */ }
+      }
+    }
+
+    // ── Step B: fetch email KPIs using triggeredSendId / triggeredSendKey ────────
+    // Each EMAILV2 activity has configurationArguments.triggeredSendId (UUID) and
+    // triggeredSendKey / triggeredSendDefinitionObjectID in configurationArguments.
+    // Use these to fetch email send stats from the messaging API.
+    if (activities.length > 0) {
+      const emailActivities = activities.filter(a => /EMAILV2|EMAIL$/i.test(String(a.type || "")));
+      for (const act of emailActivities) {
+        const cfg = act.configurationArguments as Record<string,unknown> | undefined;
+        if (!cfg) continue;
+        const ea: any = act.emailAnalytics || {};
+        if (ea.sent !== undefined || ea.totalSent !== undefined) continue; // already have data
+
+        // SFMC uses several field names for the triggered send identifier
+        const tsId  = String(cfg.triggeredSendId  || cfg.triggeredSendDefinitionObjectID || "");
+        const tsKey = String(cfg.triggeredSendKey || cfg.triggeredSendDefinitionKey || cfg.triggeredSendDefinitionId || "");
+
+        const actKey = String(act.key || act.activityKey || "");
+
+        if (!tsId && !tsKey && !actKey) {
+          addLog(`No identifiers for email activity ${String(act.name || act.key || "")}`);
+          continue;
+        }
+        addLog(`Email KPIs: ${String(act.name || act.key)} tsId=${tsId.slice(0,8)||"—"} tsKey=${tsKey||"—"} actKey=${actKey.slice(0,8)||"—"}`);
+
+        // ── Step B: REST API summary endpoints ────────────────────────────────────
+        // Note: ENT._ system DEs (ENT._Sent, ENT._Open, etc.) are not accessible
+        //       via this API path (errorcode 30003). Skipped to keep Errors tab clean.
+        const emailStatsUrls: Array<{ url: string; useJb: boolean }> = [];
+        // 1. jbinteractions per-activity stats endpoint (JB internal, returns counters)
+        if (actKey) {
+          emailStatsUrls.push({ url: `${jbBase}/interaction/v1/interactions/${journeyId}/activities/${actKey}/stats`, useJb: true });
+          emailStatsUrls.push({ url: `${jbBase}/interaction/v1/interactions/${journeyId}/activities/${actKey}/stats?extras=emailStats`, useJb: true });
+        }
+        // 2. JB journey-level metrics (may include per-activity email stats)
+        emailStatsUrls.push({ url: `${jbBase}/interaction/v1/interactions/${journeyId}/metrics`, useJb: true });
+        // 3. Triggered send definition stats via tsId (UUID format)
+        if (tsId) {
+          emailStatsUrls.push({ url: `${base}/messaging/v1/messageDefinitions/${tsId}`, useJb: false });
+          emailStatsUrls.push({ url: `${jbBase}/messaging/v1/messageDefinitions/${tsId}`, useJb: true });
+          emailStatsUrls.push({ url: `${base}/messaging/v1/messageDefinitionSends/${tsId}/summaries`, useJb: false });
+        }
+        // 4. Only use tsKey if it looks like a GUID/CustomerKey (not a plain integer)
+        if (tsKey && !/^\d+$/.test(tsKey)) {
+          emailStatsUrls.push({ url: `${base}/messaging/v1/messageDefinitions/key:${tsKey}`, useJb: false });
+          emailStatsUrls.push({ url: `${base}/messaging/v1/messageDefinitionSends/key:${tsKey}/summaries`, useJb: false });
+        }
+
+        for (const { url: emailUrl, useJb } of emailStatsUrls) {
+          try {
+            // Use silent=true to prevent 404s from cluttering the Errors tab
+            const emailData = (useJb
+              ? await fetchSfmcJb(emailUrl, tabId, true)
+              : await fetchSfmc(emailUrl, tabId, true)) as Record<string, unknown>;
+            if (!emailData || typeof emailData !== "object") continue;
+            const items = extractArray(emailData);
+            const emailObj = Array.isArray(emailData) ? (emailData[0] as Record<string,unknown>) : emailData;
+            const src = items.length > 0 ? items[0] as Record<string,unknown> : emailObj;
+            if (!src || typeof src !== "object") continue;
+            const rawKeys = Object.keys(src).join(",");
+            const kpiMap: Record<string, string[]> = {
+              sent:      ["sent","totalSent","Sent","TotalSent","totalSentCount","SendCount","NumberSent","numberSent"],
+              delivered: ["delivered","totalDelivered","Delivered","TotalDelivered","DeliveredCount","NumberDelivered"],
+              opens:     ["uniqueOpens","opens","UniqueOpens","Opens","totalOpens","OpenCount","NumberOpened","NumberUniqueOpens"],
+              clicks:    ["uniqueClicks","clicks","UniqueClicks","Clicks","totalClicks","ClickCount","NumberClicked","NumberUniqueClicks"],
+              bounces:   ["bounces","totalBounces","Bounces","TotalBounces","hardBounces","BounceCount","NumberBounced"],
+              unsubs:    ["unsubscribes","totalUnsubscribes","Unsubscribes","unsubs","OptOutCount","NumberUnsubscribed"],
+            };
+            const merged: Record<string,unknown> = {};
+            for (const [stdKey, candidates] of Object.entries(kpiMap)) {
+              for (const c of candidates) {
+                if (src[c] !== undefined && src[c] !== null) { merged[stdKey] = src[c]; break; }
+              }
+            }
+            if (Object.keys(merged).length > 0) {
+              act.emailAnalytics = { ...(act.emailAnalytics as Record<string,unknown> || {}), ...merged };
+              addLog(`Email KPIs (REST): sent=${merged.sent ?? "—"} opens=${merged.opens ?? "—"} clicks=${merged.clicks ?? "—"}`);
+              break;
+            } else {
+              addLog(`Email KPIs: no match at ${emailUrl.split("/").slice(-3).join("/")} — keys: ${rawKeys.slice(0,100)}`);
+            }
+          } catch { /* try next url */ }
+        }
+      }
+    }
+
+    // Merge hook activities into API activities — always copy any stats/counters the hook captured.
+    // The hook intercepts jbinteractions XHRs and stores contact counts (the canvas bubbles).
+    if (hookActivities.length > 0 && activities.length > 0) {
+      const hookActMap = new Map(hookActivities.map(a => [String(a.key || a.id || ""), a]));
+      for (const act of activities) {
+        const h = hookActMap.get(String(act.key || "")) || hookActMap.get(String(act.id || ""));
+        if (!h) continue;
+        // Merge metaData (statsContactsIn etc.) from hook unconditionally — never discard
+        const hMeta = h.metaData as Record<string,unknown> | undefined;
+        if (hMeta && Object.keys(hMeta).length > 0) {
+          act.metaData = { ...(hMeta), ...(act.metaData as Record<string,unknown> || {}) };
+        }
+        // Merge stats — prefer existing non-zero values but fill missing ones from hook
+        const hStats = h.stats as Record<string,unknown> | undefined;
+        if (hStats && Object.keys(hStats).length > 0) {
+          const aStats = act.stats as Record<string,unknown> || {};
+          const merged: Record<string,unknown> = { ...hStats };
+          // Keep existing values that are non-null/non-zero
+          for (const [k, v] of Object.entries(aStats)) {
+            if (v !== null && v !== undefined && v !== 0) merged[k] = v;
+          }
+          act.stats = merged;
+        }
+        // Merge counters from hook if activity doesn't already have them
+        const hCnt = h.counters as Record<string,unknown> | undefined;
+        if (hCnt && Object.keys(hCnt).length > 0 && !act.counters) {
+          act.counters = hCnt;
+        }
+        // Merge currentPopulation from hook (canvas bubble value)
+        const hCurPop = (h.stats as Record<string,unknown> | undefined)?.currentPopulation
+          ?? (h as Record<string,unknown>).currentPopulation;
+        if (hCurPop !== undefined && hCurPop !== null) {
+          act.stats = { ...(act.stats as Record<string,unknown> || {}), currentPopulation: hCurPop };
+        }
+      }
+    }
+
+    // Use the CURRENT store cache (not the stale captured snapshot) so we see
+    // data written by a sync or a previous fetchJourneyDetail since this call started.
+    const liveJourneys = get().cache["journeys"];
+    const existing = liveJourneys.find(j => String(j.id) === journeyId)
+      || cache["journeys"].find(j => String(j.id) === journeyId)
+      || {};
+    const ex = existing as Record<string, unknown>;
+    const existingCumPop = Math.max(
+      Number(ex?.stats?.cumulativePopulation ?? 0),
+      Number(ex?.cumulativePopulation ?? 0),
+      Number((ex.allVersions as Array<{cumulativePopulation:number}> | undefined)
+        ?.reduce((m, v) => Math.max(m, v.cumulativePopulation || 0), 0) ?? 0)
+    );
+
+    // Prefer the highest contact count seen across API, jb list, hook, and previous cache — never go back to 0.
+    const apiCumPop = Number((detail.stats as Record<string,unknown> | undefined)?.cumulativePopulation ?? 0);
+    const bestCumPop = Math.max(apiCumPop, jbListCumPop, hookCumPop, existingCumPop);
+    const baseStats = hookCumPop > 0 && hookCumPop >= apiCumPop
+      ? hookStats!
+      : (detail.stats && typeof detail.stats === "object" ? detail.stats as Record<string,unknown> : {});
+    const mergedStats = bestCumPop > apiCumPop
+      ? { ...baseStats, cumulativePopulation: bestCumPop }
+      : baseStats;
+
+    // Merge new allVersionsList with what was previously cached.
+    // Always take the max cumulativePopulation per version — the API may return 0 after returning real data.
+    type VersionEntry = { version: number | null; status: string; cumulativePopulation: number; lastPublishedDate?: string };
+    const existingAllVersions = ((existing as Record<string,unknown>).allVersions as VersionEntry[] | undefined) || [];
+    const verMap = new Map<number, VersionEntry>();
+    for (const v of existingAllVersions) { if (v.version !== null) verMap.set(v.version, v); }
+    for (const v of allVersionsList) {
+      if (v.version === null) continue;
+      const prev = verMap.get(v.version);
+      verMap.set(v.version, { ...v, cumulativePopulation: Math.max(v.cumulativePopulation, prev?.cumulativePopulation ?? 0) });
+    }
+    const allVersions = [...verMap.values()].sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
+
+    // Never overwrite activities with an empty array — always keep whatever was fetched
+    const existingActivities = (ex.activities as Record<string,unknown>[] | undefined) || [];
+    const finalActivities = activities.length > 0 ? activities : existingActivities;
+    addLog(`Writing ${finalActivities.length} activities to cache (fetched=${activities.length}, existing=${existingActivities.length}).`);
+
+    const merged = {
+      ...existing,
+      ...detail,
+      id: journeyId,
+      definitionId: effectiveDefId !== journeyId ? effectiveDefId : ((existing as Record<string,unknown>).definitionId ?? null),
+      activities: finalActivities,
+      goals: Array.isArray(detail.goals) ? detail.goals : (existing as Record<string, unknown>).goals || [],
+      stats: mergedStats,
+      allVersions,
+      raw: detail,
+      capturedAt: Date.now(),
+    } as import("./types").CachedItem;
+
+    const newCache = { ...get().cache };
+    const idx = newCache["journeys"].findIndex(j => String(j.id) === journeyId);
+    if (idx >= 0) newCache["journeys"] = newCache["journeys"].map((j, i) => i === idx ? merged : j);
+    else newCache["journeys"] = [merged, ...newCache["journeys"]];
+
+    const updatedAt = { ...get().updatedAt, journeys: Date.now() };
+    await chrome.storage.local.set({ sfmcBuddyCache: { cache: newCache, updatedAt, savedAt: Date.now() } });
+    set({ cache: newCache, updatedAt });
+  },
+
+  fetchAutomationDetail: async (automationId) => {
+    const { addLog, cache } = get();
+    // Always resolve a fresh tab — the stored activeTab may be stale
+    const resolvedTab = await resolveSfmcTab() || get().activeTab;
+    if (!resolvedTab?.id || !resolvedTab.url || !isSfmcUrl(resolvedTab.url)) {
+      addLog("No active SFMC tab — open SFMC first.");
+      return;
+    }
+    if (resolvedTab !== get().activeTab) set({ activeTab: resolvedTab });
+
+    const stack = getStack(resolvedTab.url);
+    if (!stack) { addLog("Cannot detect SFMC stack."); return; }
+
+    const tabId      = resolvedTab.id;
+    const mcBase     = `https://mc.${stack}.exacttarget.com`;           // direct (no /cloud/fuelapi prefix)
+    const base       = `${mcBase}/cloud/fuelapi`;                        // proxied (most endpoints)
+    const asBase     = `https://automationstudio.${stack}.marketingcloudapps.com/fuelapi`;
+
+    const existing   = cache["automations"].find(a => String(a.id) === automationId) || {};
+    const ex         = existing as Record<string, unknown>;
+    const customerKey = String(ex.customerKey || "");
+
+    addLog(`Fetching automation detail: ${automationId}…`);
+
+    // ── Full automation detail (steps, schedule, notifications) ──────────────
+    let detail: Record<string, unknown> | null = null;
+    const detailUrls = [
+      `${base}/automation/v1/automations/${automationId}`,
+      `${asBase}/automation/v1/automations/${automationId}`,
+      ...(customerKey ? [
+        `${base}/automation/v1/automations/key:${customerKey}`,
+        `${asBase}/automation/v1/automations/key:${customerKey}`,
+      ] : []),
+      `${base}/legacy/v1/beta/automations/automation/definition/${automationId}`,
+    ];
+    for (const url of detailUrls) {
+      try {
+        const data = await fetchSfmc(url, tabId) as Record<string, unknown>;
+        if (data?.id || data?.name || Array.isArray(data?.steps)) {
+          detail = data;
+          addLog(`Automation detail fetched from ${url.split("/").slice(-3).join("/")}`);
+          break;
+        }
+      } catch { /* try next */ }
+    }
+
+    // ── Run history ───────────────────────────────────────────────────────────
+    const detailObjectId = detail ? String(detail.id || detail.objectID || automationId) : automationId;
+    const detailKey      = detail ? String(detail.customerKey || detail.key || customerKey) : customerKey;
+    const altId  = detailObjectId !== automationId ? detailObjectId : null;
+    const altKey = detailKey && detailKey !== automationId ? detailKey : null;
+
+    let runs: Record<string, unknown>[] = [];
+    // FETCH_SFMC now uses direct background service-worker fetch first (no CORS restriction,
+    // reaches ALL SFMC domains) then falls back to executeScript.  All run attempts silent=true.
+    const asDirectBase = `https://automationstudio.${stack}.marketingcloudapps.com/fuelapi`;
+    const runUrls: string[] = [
+      // ── automationstudio (direct bg fetch, bypasses CSP) ─────────────────────
+      `${asDirectBase}/legacy/v1/beta/automations/automation/definition/${automationId}/history?$pageSize=100`,
+      ...(altId  ? [`${asDirectBase}/legacy/v1/beta/automations/automation/definition/${altId}/history?$pageSize=100`] : []),
+      ...(altKey ? [`${asDirectBase}/legacy/v1/beta/automations/automation/definition/key:${altKey}/history?$pageSize=100`] : []),
+      `${asDirectBase}/automation/v1/automations/${automationId}/runs?$pageSize=100`,
+      // ── mc.exacttarget.com direct (no /cloud/fuelapi) ────────────────────────
+      `${mcBase}/legacy/v1/beta/automations/automation/definition/${automationId}/history?$pageSize=100`,
+      ...(altId  ? [`${mcBase}/legacy/v1/beta/automations/automation/definition/${altId}/history?$pageSize=100`] : []),
+      // ── mc.exacttarget.com proxied (/cloud/fuelapi) ───────────────────────────
+      `${base}/legacy/v1/beta/automations/automation/definition/${automationId}/history?$pageSize=100`,
+      ...(altId  ? [`${base}/legacy/v1/beta/automations/automation/definition/${altId}/history?$pageSize=100`] : []),
+      ...(altKey ? [`${base}/legacy/v1/beta/automations/automation/definition/key:${altKey}/history?$pageSize=100`] : []),
+      `${base}/automation/v1/automations/${automationId}/runs?$pageSize=100`,
+      ...(altId  ? [`${base}/automation/v1/automations/${altId}/runs?$pageSize=100`] : []),
+      `${base}/automation/v1/automations/${automationId}/runhistory?$pageSize=100`,
+      `${base}/legacy/v1/beta/automations/runs?automationId=${automationId}&$pageSize=100`,
+    ];
+
+    addLog(`Runs: ${runUrls.length} candidates for ${automationId.slice(0,8)}…`);
+    for (const url of runUrls) {
+      const tag = url.replace(/^https?:\/\/[^/]+\/cloud\/fuelapi\//, "").split("?")[0];
+      try {
+        const data = await fetchSfmc(url, tabId, true) as unknown;
+        const raw  = data as Record<string, unknown>;
+        let items  = extractArray(data);
+        if (!items.length && Array.isArray(raw?.runs))    items = raw.runs    as Record<string, unknown>[];
+        if (!items.length && Array.isArray(raw?.history)) items = raw.history as Record<string, unknown>[];
+        if (items.length > 0) {
+          runs = items as Record<string, unknown>[];
+          addLog(`✓ ${runs.length} runs ← ${tag}`);
+          addLog(`fields: ${Object.keys(runs[0]).join(" | ")}`);
+          addLog(`sample: ${JSON.stringify(runs[0]).slice(0, 400)}`);
+          break;
+        }
+        addLog(`○ 0 items ← ${tag} [${Object.keys(raw).slice(0,5).join(",")}]`);
+      } catch (err) {
+        addLog(`✗ ${tag}: ${(err as Error).message?.slice(0, 60)}`);
+      }
+    }
+
+    // Reject pure automation-step objects (sparse: {id, step:N, activities?}) stored as runs.
+    const isStepItem = (r: Record<string, unknown>) =>
+      typeof r.step === "number" &&
+      Object.keys(r).length <= 5 &&
+      !Object.keys(r).some(k => /status/i.test(k) && r[k] != null);
+    const validRuns = runs.filter(r => !isStepItem(r));
+    addLog(`valid runs: ${validRuns.length}/${runs.length}`);
+
+    const exRunHistory = (existing as Record<string, unknown>).runHistory;
+    const existingIsStale = Array.isArray(exRunHistory) &&
+      (exRunHistory as Record<string, unknown>[]).length > 0 &&
+      (exRunHistory as Record<string, unknown>[]).every(isStepItem);
+    const finalRunHistory = validRuns.length > 0
+      ? validRuns
+      : existingIsStale ? []
+      : (Array.isArray(exRunHistory) ? exRunHistory : []);
+
+    // ── Persist ───────────────────────────────────────────────────────────────
+    const merged = {
+      ...existing,
+      ...(detail || {}),
+      id: automationId,
+      runHistory: finalRunHistory,
+      capturedAt: Date.now(),
+    } as import("./types").CachedItem;
+
+    const newCache = { ...get().cache };
+    const idx = newCache["automations"].findIndex(a => String(a.id) === automationId);
+    if (idx >= 0) newCache["automations"] = newCache["automations"].map((a, i) => i === idx ? merged : a);
+    else newCache["automations"] = [merged, ...newCache["automations"]];
+
+    const updatedAt = { ...get().updatedAt, automations: Date.now() };
+    await chrome.storage.local.set({ sfmcBuddyCache: { cache: newCache, updatedAt, savedAt: Date.now() } });
+    set({ cache: newCache, updatedAt });
+    addLog(`Automation "${String(detail?.name || automationId)}" — raw:${runs.length} valid:${validRuns.length} final:${finalRunHistory.length} run(s) cached.`);
   },
 
   searchJourneyHistory: async (req) => {

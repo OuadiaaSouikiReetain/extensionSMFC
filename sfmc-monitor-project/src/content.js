@@ -33,12 +33,17 @@
     if (message?.type !== "SFMC_BUDDY_FETCH_JSON") return false;
 
     const requestUrl = String(message.url || "");
+    const requestMethod = String(message.method || "GET").toUpperCase();
+    const requestBody = message.body != null ? message.body : null;
     const headers = buildSfmcHeaders();
     const authHeader = headers.Authorization || null;
+    if (requestBody !== null) headers["Content-Type"] = "application/json";
 
     fetch(requestUrl, {
+      method: requestMethod,
       credentials: "include",
-      headers
+      headers,
+      body: requestBody !== null ? JSON.stringify(requestBody) : undefined
     })
       .then(async response => {
         const text = await response.text();

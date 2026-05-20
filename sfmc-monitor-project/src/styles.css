@@ -51,14 +51,15 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  min-width: 760px;
+  min-width: 0;
 }
 
 body.popup-body {
-  width: min(100vw, 980px);
-  min-width: 360px;
+  width: 800px;
+  min-width: 0;
   max-height: 100vh;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .buddy-body {
@@ -67,17 +68,17 @@ body.popup-body {
 
 .buddy-shell {
   display: grid;
-  grid-template-columns: minmax(190px, 230px) minmax(0, 1fr);
-  min-height: min(720px, 100vh);
+  grid-template-columns: 165px minmax(0, 1fr);
+  min-height: min(680px, 100vh);
 }
 
 .buddy-sidebar {
   background: #151a2b;
   border-right: 1px solid var(--border);
-  padding: 16px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
 }
 
 .brand-block {
@@ -150,11 +151,12 @@ body.popup-body {
 }
 
 .buddy-main {
-  padding: 16px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
+  overflow-x: hidden;
 }
 
 .buddy-topbar,
@@ -173,8 +175,8 @@ body.popup-body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 8px 10px;
 }
 
 .session-pill {
@@ -251,13 +253,13 @@ body.popup-body {
 }
 
 .collection-card {
-  min-height: 82px;
+  min-height: 68px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
   color: var(--text);
   text-align: left;
-  padding: 13px;
+  padding: 10px;
   cursor: pointer;
 }
 
@@ -269,12 +271,12 @@ body.popup-body {
 .collection-card span {
   display: block;
   color: var(--muted);
-  font-size: 12px;
-  margin-bottom: 10px;
+  font-size: 11px;
+  margin-bottom: 5px;
 }
 
 .collection-card strong {
-  font-size: 24px;
+  font-size: 20px;
 }
 
 .global-search-panel {
@@ -1728,13 +1730,13 @@ kbd {
 
 .automation-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 2fr) minmax(120px, 1fr) minmax(100px, .9fr) minmax(140px, 1fr) minmax(160px, 1.1fr);
-  gap: 12px;
+  grid-template-columns: minmax(140px, 2fr) minmax(80px, 1fr) minmax(72px, .9fr) minmax(90px, 1fr) minmax(100px, 1fr);
+  gap: 8px;
   align-items: center;
 }
 
 .automation-row {
-  padding: 12px 14px;
+  padding: 8px 10px;
 }
 
 .automation-name,

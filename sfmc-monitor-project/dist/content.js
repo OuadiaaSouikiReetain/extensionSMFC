@@ -13,15 +13,58 @@
 
   if (!SFMC_HOST_RE.test(location.hostname + location.pathname)) return;
 
+  // ── Safe send — stops everything if extension context is invalidated ───────
+  let _dead = false;
+  function safeSend(msg) {
+    if (_dead) return;
+    try {
+      if (!chrome.runtime?.id) { _dead = true; cleanup(); return; }
+      chrome.runtime.sendMessage(msg).catch(() => null);
+    } catch (e) {
+      if (/invalidated|Extension context/i.test(e?.message || "")) { _dead = true; cleanup(); }
+    }
+  }
+
+  function cleanup() {
+    observer.disconnect();
+    clearInterval(_snapshotInterval);
+    clearInterval(_mineInterval);
+  }
+
+  // ── Receive payloads from sfmc-hook.js (world MAIN) ───────────────────────
+  // Write directly to chrome.storage — no background service worker needed.
+  window.addEventListener("message", event => {
+    if (!event.data?.__sfmcBuddy || event.source !== window) return;
+    try {
+      chrome.storage.local.get("sfmcHookQueue", data => {
+        if (chrome.runtime.lastError) return;
+        const queue = Array.isArray(data.sfmcHookQueue) ? data.sfmcHookQueue : [];
+        queue.push({ url: event.data.url, json: event.data.json, ts: Date.now(), tabUrl: window.location.href });
+        if (queue.length > 100) queue.splice(0, queue.length - 100);
+        chrome.storage.local.set({ sfmcHookQueue: queue });
+      });
+    } catch { /* context invalidated */ }
+  });
+
   // ── Message listener ───────────────────────────────────────────────────────
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type !== "SFMC_BUDDY_FETCH_JSON") return false;
     const requestUrl = String(message.url || "");
+    const method = String(message.method || "GET").toUpperCase();
+    const body = message.body ?? null;
     const headers = buildSfmcHeaders();
-    fetch(requestUrl, { credentials: "include", headers })
-      .then(async response => { const text = await response.text(); sendResponse({ ok: response.ok, status: response.status, text, url: requestUrl, authUsed: Boolean(headers.Authorization) }); })
-      .catch(error => { sendResponse({ ok: false, status: 0, error: error?.message || String(error), url: requestUrl, authUsed: Boolean(headers.Authorization) }); });
+    if (body !== null && !headers["Content-Type"]) {
+      headers["Content-Type"] = "application/json;charset=UTF-8";
+    }
+    fetch(requestUrl, { method, credentials: "include", headers, body: body !== null ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined })
+      .then(async response => {
+        const text = await response.text();
+        sendResponse({ ok: response.ok, status: response.status, text, url: requestUrl, authUsed: Boolean(headers.Authorization) });
+      })
+      .catch(error => {
+        sendResponse({ ok: false, status: 0, error: error?.message || String(error), url: requestUrl, authUsed: Boolean(headers.Authorization) });
+      });
     return true;
   });
 
@@ -37,7 +80,7 @@
     const signature = JSON.stringify({ url: payload.url, activities: activities.map(item => `${item.key}:${item.type}:${item.name}`) });
     if (signature === lastSignature) return;
     lastSignature = signature;
-    chrome.runtime.sendMessage({ type: "SFMC_CANVAS_SNAPSHOT", payload }).catch(() => null);
+    safeSend({ type: "SFMC_CANVAS_SNAPSHOT", payload });
   }
 
   function collectCanvasActivities() {
@@ -49,18 +92,8 @@
   }
 
   function exposeActivityKeys(activities) {
-    ensureStyle();
-    for (const activity of activities) {
-      const nodes = [...document.querySelectorAll(ACTIVITY_SELECTOR)];
-      const node = nodes[activity.domIndex];
-      if (!node || node.querySelector(":scope > .sfmc-buddy-activity-key")) continue;
-      const badge = document.createElement("div");
-      badge.className = "sfmc-buddy-activity-key";
-      badge.textContent = activity.key;
-      node.style.position = node.style.position || "relative";
-      node.prepend(badge);
-    }
-    if (activities.length) chrome.runtime.sendMessage({ type: "SFMC_BUDDY_COLLECTION", collection: "canvasActivities", items: activities, source: location.href }).catch(() => null);
+    // Badge injection disabled — was breaking Journey Builder canvas rendering
+    if (activities.length) safeSend({ type: "SFMC_BUDDY_COLLECTION", collection: "canvasActivities", items: activities, source: location.href });
   }
 
   function extractPublicationLists() {
@@ -68,7 +101,7 @@
     const rows = [...document.querySelectorAll("tr, [role='row'], li")];
     const lists = rows.map(row => { const text = row.textContent.replace(/\s+/g, " ").trim(); if (!text || !/\d/.test(text)) return null; const id = findId(row); if (!id) return null; const name = text.replace(String(id), "").trim().slice(0, 180); addInlineId(row, id); return { id, name: name || text, capturedAt: Date.now(), url: location.href }; }).filter(Boolean);
     const unique = dedupe(lists, item => item.id);
-    if (unique.length) chrome.runtime.sendMessage({ type: "SFMC_BUDDY_COLLECTION", collection: "publicationLists", items: unique, source: location.href }).catch(() => null);
+    if (unique.length) safeSend({ type: "SFMC_BUDDY_COLLECTION", collection: "publicationLists", items: unique, source: location.href });
   }
 
   // ── Storage mining (NEW) ──────────────────────────────────────────────────
@@ -114,7 +147,7 @@
     if (signature === lastMineSignature) return;
     lastMineSignature = signature;
 
-    chrome.runtime.sendMessage({ type: "SFMC_BUDDY_STORAGE_MINED", payload: result, url: location.href }).catch(() => null);
+    safeSend({ type: "SFMC_BUDDY_STORAGE_MINED", payload: result, url: location.href });
   }
 
   function classifyEntry(key, parsed, raw, result) {
@@ -401,7 +434,7 @@
 
   // ── DOM observer + triggers ───────────────────────────────────────────────
 
-  const observer = new MutationObserver(() => scheduleSnapshot("dom-mutated"));
+  const observer = new MutationObserver(() => { if (_dead) return; scheduleSnapshot("dom-mutated"); });
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-activity-key","class","title","aria-label"] });
 
   window.addEventListener("popstate", () => { scheduleSnapshot("navigation"); mineStorageData(); });
@@ -409,6 +442,6 @@
 
   scheduleSnapshot("initial-load");
   mineStorageData();
-  setInterval(() => scheduleSnapshot("interval"), 5000);
-  setInterval(() => mineStorageData(), 30000);
+  const _snapshotInterval = setInterval(() => scheduleSnapshot("interval"), 5000);
+  const _mineInterval     = setInterval(() => mineStorageData(), 30000);
 })();

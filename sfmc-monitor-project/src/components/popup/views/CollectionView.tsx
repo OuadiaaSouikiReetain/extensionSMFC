@@ -7,7 +7,7 @@ import { formatNumber, relativeTime, statusVariant } from "../../../utils/format
 import type { CollectionKey, CachedItem } from "../../../store/types";
 
 const COLS: Record<CollectionKey, string[]> = {
-  journeys: ["name", "status", "version"],
+  journeys: ["name", "status", "version", "contacts"],
   automations: ["name", "status", "lastRunStatus", "lastRunTime"],
   sqlQueries: ["name", "customerKey", "status"],
   dataExtensions: ["name", "customerKey", "id"],
@@ -100,18 +100,92 @@ export function CollectionView() {
             title="No items available"
             message={search ? "No items match this search." : "Run Sync all collections from the dashboard first."}
           />
+        ) : key === "journeys" ? (
+          /* ── Journey card list ─────────────────────────────────────────── */
+          <div style={{ display: "flex", flexDirection: "column", gap: 1, padding: "4px 0" }}>
+            {filtered.map((item, index) => {
+              const status = String(item.status || "");
+              const version = item.version;
+              type VEntry = { version: number | null; status: string; cumulativePopulation: number };
+              const allVersions: VEntry[] = Array.isArray((item as Record<string,unknown>).allVersions)
+                ? (item as Record<string,unknown>).allVersions as VEntry[]
+                : [];
+              const contactsPop = Number(
+                (item.stats as Record<string,unknown> | undefined)?.cumulativePopulation ??
+                (item as Record<string,unknown>).cumulativePopulation ?? 0
+              );
+              const bestContacts = allVersions.reduce((max, v) => Math.max(max, v.cumulativePopulation || 0), contactsPop);
+              const fmtContacts = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+
+              return (
+                <div
+                  key={String(item.id || index)}
+                  className="object-row"
+                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", cursor: "pointer" }}
+                  onClick={() => setView("detail", key, String(item.id || ""))}
+                >
+                  {/* Left: name + meta */}
+                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 5 }}>
+                    <span className="col-name" style={{ fontWeight: 600, fontSize: ".82rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {String(item.name || item.id || "-")}
+                    </span>
+                    <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+                      {status && <Badge variant={statusVariant(status)}>{status}</Badge>}
+                      {allVersions.length > 0 ? (
+                        allVersions.map((v) => {
+                          const isDraft = /draft/i.test(v.status);
+                          return (
+                            <span key={v.version} style={{
+                              fontSize: ".65rem", padding: "1px 7px", borderRadius: 9,
+                              border: "1px solid var(--border-subtle)",
+                              background: "var(--bg-elevated)",
+                              color: isDraft ? "var(--text-muted)" : "var(--brand)",
+                              fontFamily: "var(--font-mono)",
+                            }}>
+                              v{v.version}{isDraft ? " Draft" : /published/i.test(v.status) ? " Published" : ""}
+                              {v.cumulativePopulation > 0 ? ` · ${fmtContacts(v.cumulativePopulation)}` : ""}
+                            </span>
+                          );
+                        })
+                      ) : version != null ? (
+                        <span style={{ fontSize: ".65rem", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>v{String(version)}</span>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {/* Right: contact count */}
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1, minWidth: 36 }}>
+                    <span style={{
+                      fontSize: ".85rem", fontFamily: "var(--font-mono)", fontWeight: 700,
+                      color: bestContacts > 0 ? "var(--brand)" : "var(--text-muted)",
+                    }}>
+                      {bestContacts > 0 ? fmtContacts(bestContacts) : "—"}
+                    </span>
+                    <span style={{ fontSize: ".62rem", color: "var(--text-muted)", letterSpacing: ".02em" }}>contacts</span>
+                  </div>
+
+                  <span style={{ color: "var(--text-muted)", fontSize: ".72rem" }}>{"›"}</span>
+                </div>
+              );
+            })}
+          </div>
         ) : (
+          /* ── Generic table for all other collections ───────────────────── */
           <div className="table-scroll">
             <div className="object-table-inner">
-              <div className="object-table-header" style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "140px").join(" ")} 32px` }}>
-                {columns.map((column) => <span key={column}>{column}</span>)}
+              <div className="object-table-header" style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "100px").join(" ")} 32px` }}>
+                {columns.map((column) => (
+                  <span key={column} style={{ textTransform: "capitalize" }}>
+                    {column === "lastRunStatus" ? "Last Status" : column === "lastRunTime" ? "Last Run" : column}
+                  </span>
+                ))}
                 <span />
               </div>
               {filtered.map((item, index) => (
                 <div
                   key={String(item.id || index)}
                   className="object-row"
-                  style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "140px").join(" ")} 32px` }}
+                  style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "100px").join(" ")} 32px` }}
                   onClick={() => setView("detail", key, String(item.id || ""))}
                 >
                   <span className="col-name">{String(item.name || item.id || "-")}</span>

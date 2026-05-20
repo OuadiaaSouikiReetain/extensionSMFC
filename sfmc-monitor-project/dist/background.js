@@ -21,6 +21,16 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === "purge") purgeOldData();
 });
 
+// ── SFMC hook: receive intercepted XHR/fetch payloads from sfmc-hook.js ──────
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "SFMC_HOOK_PAYLOAD") return false;
+  const tabId = sender.tab?.id || "unknown";
+  handleInteractionPayload(tabId, message.url, message.json).catch(() => null);
+  sendResponse({ ok: true });
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return false;
 
@@ -68,6 +78,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "FETCH_SFMC_JB") {
+    fetchSfmcFromJbinteractions(message).then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type === "FETCH_SFMC_POST") {
     fetchSfmcPost(message).then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message }));
     return true;
@@ -99,6 +114,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   return false;
+});
+
+// ── Process sfmcHookQueue written by content.js ──────────────────────────────
+// Content script writes to storage (bypassing the possibly-terminated SW).
+// storage.onChanged wakes the SW and lets us process each intercepted payload.
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes.sfmcHookQueue) return;
+  const items = changes.sfmcHookQueue.newValue;
+  if (!Array.isArray(items) || items.length === 0) return;
+  // Clear queue immediately to avoid reprocessing
+  chrome.storage.local.set({ sfmcHookQueue: [] });
+  (async () => {
+    const allTabs = await chrome.tabs.query({});
+    const sfmcTabs = allTabs.filter(t => isSfmcTab(t));
+
+    for (const item of items) {
+      if (!item?.url || !item?.json) continue;
+
+      let tabId = sfmcTabs[0]?.id || "hook";
+
+      if (item.tabUrl) {
+        const itemOrigin = (() => { try { return new URL(item.tabUrl).origin; } catch { return null; } })();
+        // Exact match: main-frame call (mc.exacttarget.com tab visible in Chrome)
+        const exactMatch = sfmcTabs.find(t => { try { return new URL(t.url).origin === itemOrigin; } catch { return false; } });
+        if (exactMatch) {
+          tabId = exactMatch.id;
+        } else {
+          // Iframe call (jbinteractions, etc.) — the visible SFMC tab is the parent.
+          // Prefer the active tab, then any SFMC tab.
+          const activeMatch = sfmcTabs.find(t => t.active) || sfmcTabs[0];
+          if (activeMatch) tabId = activeMatch.id;
+        }
+      }
+
+      await handleInteractionPayload(tabId, item.url, item.json).catch(() => null);
+    }
+  })();
 });
 
 // ── Debugger (network capture) ──────────────────────────────────────────────
@@ -164,7 +217,8 @@ async function startNetworkCapture(tabId, mode = "journey", timeoutMs = null) {
   await chrome.debugger.sendCommand(target, "Page.enable");
   await updateTabState(tabId, { captureStatus: "running", captureMode: mode, captureStartedAt: Date.now(), debug: [], traces: [] });
   appendDebug(tabId, `${mode} capture started.`);
-  const duration = Number(timeoutMs) || (mode === "sql" ? 60000 : 20000);
+  // -1 = no timeout (auto-capture mode); null/0 = default timeout
+  const duration = timeoutMs === -1 ? -1 : (Number(timeoutMs) || (mode === "sql" ? 60000 : 20000));
   if (duration > 0) setTimeout(() => stopNetworkCapture(tabId), duration);
   return { ok: true };
 }
@@ -179,14 +233,49 @@ async function stopNetworkCapture(tabId) {
 
 // ── SFMC fetch helpers ───────────────────────────────────────────────────────
 
-async function fetchSfmcWithCookies({ url, method = "GET", body = null, tabId }) {
+async function fetchSfmcWithCookies({ url, method = "GET", body = null, tabId, silent = false }) {
   const candidates = await findCookieTabCandidates(url, tabId);
   if (!candidates.length) throw new Error(`No open SFMC tab with cookies for ${safeHostname(url)}.`);
   let lastError = null;
   for (const candidateTabId of candidates) {
-    try { return await executeFetchInTab(candidateTabId, url, method, body); } catch (error) { lastError = error; }
+    try { return await executeFetchInTab(candidateTabId, url, method, body, silent); } catch (error) { lastError = error; }
   }
   throw lastError || new Error("Cookie fetch failed");
+}
+
+// Find the jbinteractions iframe frame within a tab using webNavigation.
+// Returns null if webNavigation permission is absent or frame is not found.
+async function getJbinteractionsFrame(tabId) {
+  try {
+    return await new Promise(resolve => {
+      chrome.webNavigation.getAllFrames({ tabId }, frames => {
+        const jb = (frames || []).find(f => /jbinteractions/.test(f.url || ""));
+        resolve(jb || null);
+      });
+    });
+  } catch { return null; }
+}
+
+// Fetch a jbinteractions URL using the iframe's content script (same-origin, no CORS).
+// Falls back to the standard cookie-based fetch if the frame is not found.
+// Pass silent=true to suppress error logging (for exploratory/optional fetches).
+async function fetchSfmcFromJbinteractions({ url, tabId, silent = false }) {
+  const frame = tabId ? await getJbinteractionsFrame(tabId) : null;
+  if (frame) {
+    try {
+      const payload = await chrome.tabs.sendMessage(tabId, { type: "SFMC_BUDDY_FETCH_JSON", url }, { frameId: frame.frameId });
+      if (payload && !payload.error) {
+        let data;
+        try { data = JSON.parse(payload.text); } catch { data = { raw: payload.text }; }
+        if (!payload.ok) {
+          if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: payload.status, message: String(payload.text || "").slice(0, 500), capturedAt: Date.now() });
+          throw new Error(`HTTP ${payload.status}: ${String(payload.text || "").slice(0, 180)}`);
+        }
+        return { ok: true, data, status: payload.status };
+      }
+    } catch { /* fall through to regular fetch */ }
+  }
+  return fetchSfmcWithCookies({ url, tabId, silent });
 }
 
 // NEW: POST fetch with JSON body — used for Journey History search
@@ -230,23 +319,153 @@ async function findCookieTabCandidates(url, preferredTabId) {
   return candidates;
 }
 
-async function executeFetchInTab(tabId, url, method, body) {
+async function getSfmcHeadersFromTab(tabId) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      const readStorage = key => {
+        try { return window.localStorage.getItem(key) || window.sessionStorage.getItem(key); } catch { return null; }
+      };
+      const sanitizeToken = raw => {
+        const v = String(raw || "").trim();
+        return (!v || v === "null" || v === "undefined") ? null : v;
+      };
+      const extractBearer = raw => {
+        if (!raw) return null;
+        const text = String(raw);
+        const bearerMatch = text.match(/Bearer\s+([A-Za-z0-9\-_=]+(?:\.[A-Za-z0-9\-_=]+){2,})/i);
+        if (bearerMatch) return `Bearer ${bearerMatch[1]}`;
+        const jwtMatch = text.match(/\b([A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+){2,})\b/);
+        if (jwtMatch) return `Bearer ${jwtMatch[1]}`;
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed && typeof parsed === "object") {
+            for (const key of ["authorization","accessToken","access_token","token","jwt"]) {
+              const candidate = parsed[key];
+              if (candidate) {
+                const nested = extractBearer(candidate);
+                if (nested) return nested;
+              }
+            }
+          }
+        } catch {
+          return null;
+        }
+        return null;
+      };
+      const findTokenInStorage = pattern => {
+        for (const storage of [window.localStorage, window.sessionStorage]) {
+          try {
+            for (let i = 0; i < storage.length; i++) {
+              const key = storage.key(i);
+              if (!pattern.test(String(key || ""))) continue;
+              const token = sanitizeToken(storage.getItem(key));
+              if (token) return token;
+            }
+          } catch { }
+        }
+        return null;
+      };
+      const findAuthorizationHeader = () => {
+        for (const key of ["token","accessToken","access_token","authToken","authorization","jwt","platformAuthToken"]) {
+          const hit = readStorage(key);
+          const token = extractBearer(hit);
+          if (token) return token;
+        }
+        for (const storage of [window.localStorage, window.sessionStorage]) {
+          try {
+            for (let i = 0; i < storage.length; i++) {
+              const key = storage.key(i);
+              const value = storage.getItem(key);
+              const token = extractBearer(value);
+              if (token) return token;
+            }
+          } catch { }
+        }
+        return null;
+      };
+      const findCsrfToken = () => {
+        for (const key of ["x-csrf-token","csrfToken","csrf_token","_csrf","fuelCsrfToken"]) {
+          const hit = readStorage(key);
+          const token = sanitizeToken(hit);
+          if (token) return token;
+        }
+        const metaToken = document.querySelector("meta[name='csrf-token'], meta[name='x-csrf-token'], meta[name='_csrf']")?.content;
+        if (sanitizeToken(metaToken)) return sanitizeToken(metaToken);
+        return findTokenInStorage(/csrf/i);
+      };
+      const findFuelDataVersion = () => {
+        for (const key of ["x-fueldata-version","fueldataVersion","fuelDataVersion"]) {
+          const hit = readStorage(key);
+          const version = sanitizeToken(hit);
+          if (version) return version;
+        }
+        return "1.1";
+      };
+      return {
+        authorization: findAuthorizationHeader(),
+        csrfToken: findCsrfToken(),
+        fuelDataVersion: findFuelDataVersion(),
+      };
+    }
+  });
+  return result?.result || {};
+}
+
+async function executeFetchInBackground(tabId, url, method, body, silent = false) {
+  const tokenHeaders = await getSfmcHeadersFromTab(tabId);
+  const headers = {
+    Accept: "application/json, text/javascript, */*; q=0.01",
+    "X-Requested-With": "XMLHttpRequest",
+  };
+  if (tokenHeaders.authorization) headers.Authorization = tokenHeaders.authorization;
+  if (tokenHeaders.csrfToken) headers["x-csrf-token"] = tokenHeaders.csrfToken;
+  if (tokenHeaders.fuelDataVersion) headers["x-fueldata-version"] = tokenHeaders.fuelDataVersion;
+  if (body !== null && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json;charset=UTF-8";
+  }
+  const response = await fetch(url, {
+    method,
+    credentials: "include",
+    headers,
+    body: body !== null ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+  });
+  const text = await response.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!response.ok) {
+    if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: response.status, message: String(text || "").slice(0, 500), capturedAt: Date.now() });
+    throw new Error(`HTTP ${response.status}: ${String(text || "").slice(0, 180)}`);
+  }
+  return { ok: true, data, status: response.status };
+}
+
+async function executeFetchInTab(tabId, url, method, body, silent = false) {
   try {
     const payload = await chrome.tabs.sendMessage(tabId, {
       type: "SFMC_BUDDY_FETCH_JSON",
-      url
+      url,
+      method,
+      body,
     });
     if (payload && !payload.error) {
       let data;
       try { data = JSON.parse(payload.text); } catch { data = { raw: payload.text }; }
       if (!payload.ok) {
-        storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: payload.status, message: String(payload.text || "").slice(0, 500), capturedAt: Date.now() });
+        if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: payload.status, message: String(payload.text || "").slice(0, 500), capturedAt: Date.now() });
         throw new Error(`HTTP ${payload.status}: ${String(payload.text || "").slice(0, 180)}`);
       }
       return { ok: true, data, status: payload.status };
     }
   } catch (error) {
-    // Fall back to script injection when the content-script bridge is unavailable.
+    // Fall back to background fetch and script injection when the content-script bridge is unavailable.
+  }
+
+  try {
+    return await executeFetchInBackground(tabId, url, method, body, silent);
+  } catch (error) {
+    // If the background fetch cannot resolve the request, fall back to a page-context fetch.
   }
 
   const [result] = await chrome.scripting.executeScript({
@@ -278,7 +497,7 @@ async function executeFetchInTab(tabId, url, method, body) {
   const { ok, status, text } = result.result;
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  if (!ok) { storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status, message: text.slice(0, 500), capturedAt: Date.now() }); throw new Error(`HTTP ${status}: ${text.slice(0, 180)}`); }
+  if (!ok) { if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status, message: text.slice(0, 500), capturedAt: Date.now() }); throw new Error(`HTTP ${status}: ${text.slice(0, 180)}`); }
   return { ok: true, data, status };
 }
 
@@ -404,7 +623,14 @@ async function updateJourney(tabId, journey) {
   state.tabs = state.tabs || {};
   const tabState = state.tabs[key] || { journeys: {}, journeyList: [] };
   tabState.journeys = tabState.journeys || {};
+  // Store under main id (always latest captured version)
   tabState.journeys[journey.id] = { ...tabState.journeys[journey.id], ...journey, capturedAt: Date.now() };
+  // Also store a versioned copy so older versions aren't lost when a newer one is captured.
+  // fetchJourneyDetail Step 1 will look for the version with the most contacts.
+  if (journey.version != null) {
+    const vKey = `${journey.id}_v${journey.version}`;
+    tabState.journeys[vKey] = { ...journey, capturedAt: Date.now() };
+  }
   tabState.updatedAt = Date.now();
   state.tabs[key] = tabState;
   await setState(state);
@@ -562,7 +788,7 @@ function mergeItems(existing, incoming) {
 }
 
 function notify(title, message) {
-  try { chrome.notifications.create({ type: "basic", iconUrl: "icons/icon48.png", title: `Sezane Monitoring - ${title}`, message: String(message || "").slice(0, 180) }); } catch { /* ignore */ }
+  try { chrome.notifications.create({ type: "basic", iconUrl: chrome.runtime.getURL("icons/icon48.png"), title: `Sezane Monitoring - ${title}`, message: String(message || "").slice(0, 180) }); } catch { /* ignore */ }
 }
 
 function sanitizeHostPath(rawUrl) { try { const url = new URL(rawUrl); return `${url.hostname}${url.pathname}`; } catch { return String(rawUrl || "").slice(0, 160); } }

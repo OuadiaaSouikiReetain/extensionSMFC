@@ -22,9 +22,30 @@ export function relativeTime(ts: number | undefined): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+// Parse a value that may be ISO string, timestamp, or SFMC WCF format "/Date(1234567890)/"
+export function parseSfmcDate(ts: number | string | undefined | null): Date | null {
+  if (!ts) return null;
+  try {
+    if (typeof ts === "number") {
+      const d = new Date(ts);
+      return isNaN(d.getTime()) || d.getFullYear() < 2000 ? null : d;
+    }
+    const s = String(ts);
+    // WCF JSON date: /Date(1234567890)/ or /Date(1234567890+0000)/
+    const wcf = s.match(/\/Date\((\d+)([+-]\d{4})?\)\//);
+    if (wcf) {
+      const d = new Date(parseInt(wcf[1], 10));
+      return isNaN(d.getTime()) || d.getFullYear() < 2000 ? null : d;
+    }
+    const d = new Date(s);
+    return isNaN(d.getTime()) || d.getFullYear() < 2000 ? null : d;
+  } catch { return null; }
+}
+
 export function formatTs(ts: number | string | undefined | null): string {
-  if (!ts) return "—";
-  try { return new Date(Number(ts)).toLocaleString("fr-FR"); } catch { return String(ts); }
+  const d = parseSfmcDate(ts);
+  if (!d) return "—";
+  try { return d.toLocaleString("fr-FR"); } catch { return "—"; }
 }
 
 export function formatIso(iso: string | undefined | null): string {

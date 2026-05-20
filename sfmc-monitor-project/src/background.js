@@ -89,7 +89,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "FETCH_SFMC") {
-    fetchSfmcWithCookies(message).then(sendResponse).catch(error => {
+    // Use fetchSfmc (direct background fetch + in-page executeScript fallback) so we can
+    // reach ALL SFMC domains including automationstudio.* which is CSP-blocked for in-page fetches.
+    fetchSfmc(message).then(sendResponse).catch(error => {
       sendResponse({ ok: false, error: error.message });
     });
     return true;
@@ -199,59 +201,87 @@ async function startNetworkCapture(tabId, mode = "journey", timeoutMs = null) {
   return { ok: true };
 }
 
-async function fetchSfmc({ url, method = "GET", body = null, tabId }) {
-  // 1. Background service worker fetch — no CORS restriction, sends browser cookies
-  //    for the target domain (jbinteractions.*, automationstudio.*, etc.).
-  try {
-    const response = await fetch(url, {
-      method,
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined
-    });
-    const text = await response.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-    if (!response.ok) {
-      if (response.status !== 401 || !tabId) {
-        storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: response.status, message: text.slice(0, 500), capturedAt: Date.now() });
-        throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
+async function fetchSfmc({ url, method = "GET", body = null, tabId, silent = false }) {
+  // Strategy (in order):
+  // 1. Content-script relay  — uses Bearer JWT + CSRF from localStorage (strongest auth)
+  // 2. executeScript fallback — for tabs where content script isn't ready
+  // 3. Direct service-worker fetch — last resort (no localStorage tokens)
+
+  // ── 1. Content-script relay ──────────────────────────────────────────────────
+  if (tabId) {
+    try {
+      const csResult = await new Promise((resolve, reject) => {
+        chrome.tabs.sendMessage(tabId, { type: "SFMC_BUDDY_FETCH_JSON", url, method, body }, res => {
+          if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+          if (!res) { reject(new Error("No response from content script")); return; }
+          resolve(res);
+        });
+      });
+      if (csResult.ok) {
+        let data;
+        try { data = JSON.parse(csResult.text); } catch { data = { raw: csResult.text }; }
+        return { ok: true, data, status: csResult.status };
       }
-      // 401: try the in-page fallback before giving up
-    } else {
-      return { ok: true, data, status: response.status };
+      // Non-OK response — store error only if not silent
+      if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: csResult.status, message: String(csResult.text || "").slice(0, 500), capturedAt: Date.now() });
+      throw new Error(`HTTP ${csResult.status}: ${String(csResult.text || "").slice(0, 180)}`);
+    } catch (err) {
+      // Content script not available (tab not loaded, wrong frame, etc.) — fall through
+      if (!/No response|Could not establish|lastError|Receiving end does not exist/i.test(err.message || "")) {
+        throw err; // Real error (4xx/5xx) — propagate
+      }
     }
-  } catch (err) {
-    // Re-throw anything that isn't a 401 (network error, 5xx, etc.)
-    if (!tabId || /HTTP [^4]|HTTP 4[^0]|HTTP 40[^1]/.test(err.message || "")) throw err;
   }
 
-  // 2. In-page fallback — runs inside the SFMC tab so its session cookies are used
-  //    directly. Works when the tab is on the same subdomain as the request URL.
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: async (fetchUrl, fetchMethod, fetchBody) => {
-      const resp = await fetch(fetchUrl, {
-        method: fetchMethod,
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: fetchBody !== null ? JSON.stringify(fetchBody) : undefined
+  // ── 2. executeScript fallback (CSRF from localStorage, no Bearer JWT) ────────
+  if (tabId) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: async (fetchUrl, fetchMethod, fetchBody) => {
+          const read = key => { try { return localStorage.getItem(key) || sessionStorage.getItem(key); } catch { return null; } };
+          const tok = v => { const s = String(v||"").trim(); return s && s !== "null" && s !== "undefined" ? s : null; };
+          const headers = { Accept: "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest" };
+          const csrf = tok(read("x-csrf-token")) || tok(read("csrfToken")) || tok(read("csrf_token")) || tok(document.querySelector("meta[name='csrf-token']")?.content);
+          if (csrf) headers["x-csrf-token"] = csrf;
+          const fv = tok(read("x-fueldata-version")) || "1.1";
+          headers["x-fueldata-version"] = fv;
+          if (fetchBody !== null) headers["Content-Type"] = "application/json";
+          const resp = await fetch(fetchUrl, { method: fetchMethod, credentials: "include", headers, body: fetchBody !== null ? JSON.stringify(fetchBody) : undefined });
+          const text = await resp.text();
+          return { status: resp.status, ok: resp.ok, text };
+        },
+        args: [url, method, body]
       });
-      const text = await resp.text();
-      return { status: resp.status, ok: resp.ok, text };
-    },
-    args: [url, method, body]
+      if (result?.result) {
+        const { status, ok, text } = result.result;
+        let data;
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
+        if (ok) return { ok: true, data, status };
+        if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status, message: text.slice(0, 500), capturedAt: Date.now() });
+        throw new Error(`HTTP ${status}: ${text.slice(0, 180)}`);
+      }
+    } catch (err) {
+      if (!/Cannot access|No tab|executeScript/i.test(err.message || "")) throw err;
+    }
+  }
+
+  // ── 3. Direct service-worker fetch (cookies only, no localStorage tokens) ────
+  const response = await fetch(url, {
+    method,
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined
   });
-  if (!result?.result) throw new Error("Empty script result");
-  const { status, ok, text } = result.result;
+  const text = await response.text();
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  if (!ok) {
-    storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status, message: text.slice(0, 500), capturedAt: Date.now() });
-    throw new Error(`HTTP ${status}: ${text.slice(0, 180)}`);
+  if (!response.ok) {
+    if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: response.status, message: text.slice(0, 500), capturedAt: Date.now() });
+    throw new Error(`HTTP ${response.status}: ${text.slice(0, 180)}`);
   }
-  return { ok: true, data, status };
+  return { ok: true, data, status: response.status };
 }
 
 async function fetchSfmcWithCookies({ url, method = "GET", body = null, tabId }) {
