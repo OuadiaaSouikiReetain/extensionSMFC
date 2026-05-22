@@ -1,4 +1,4 @@
-import { create } from "zustand";
+﻿import { create } from "zustand";
 import type {
   View,
   CollectionKey,
@@ -62,6 +62,7 @@ interface AppStore {
   searchJourneyHistory: (req: JourneyHistorySearchRequest) => Promise<void>;
   fetchJourneyDetail: (journeyId: string, version?: number | null) => Promise<void>;
   fetchAutomationDetail: (automationId: string) => Promise<void>;
+  fetchKpisFromDataViews: (journeyId: string, journeyName: string, tsIds: string[]) => Promise<void>;
 }
 
 function emptyCache(): Record<CollectionKey, CachedItem[]> {
@@ -90,6 +91,12 @@ async function fetchSfmcPost(url: string, body: unknown, tabId?: number): Promis
   const res = await chrome.runtime.sendMessage({ type: "FETCH_SFMC_POST", url, body, tabId });
   if (!res?.ok) throw new Error(res?.error || "POST fetch failed");
   return res.data;
+}
+
+async function fetchSfmcSoap(url: string, xmlTemplate: string, tabId?: number): Promise<string> {
+  const res = await chrome.runtime.sendMessage({ type: "FETCH_SFMC_SOAP", url, xmlTemplate, tabId });
+  if (!res?.ok) throw new Error(res?.error || "SOAP fetch failed");
+  return String(res.data?.raw || "");
 }
 
 function getStack(tabUrl: string): string | null {
@@ -1290,6 +1297,203 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await chrome.storage.local.set({ sfmcBuddyCache: { cache: newCache, updatedAt, savedAt: Date.now() } });
     set({ cache: newCache, updatedAt });
     addLog(`Automation "${String(detail?.name || automationId)}" — raw:${runs.length} valid:${validRuns.length} final:${finalRunHistory.length} run(s) cached.`);
+  },
+
+  fetchKpisFromDataViews: async (journeyId, journeyName, tsIds) => {
+    const { addLog, activeTab } = get();
+    addLog(`📊 DV KPIs: fetching for "${journeyName}"…`);
+
+    // 1. Resolve SFMC tab
+    if (!activeTab?.id || !activeTab.url || !isSfmcUrl(activeTab.url)) {
+      addLog("⚠️ DV KPIs: no active SFMC tab found.");
+      return;
+    }
+    const tabId = activeTab.id;
+    const stack = getStack(activeTab.url);
+    if (!stack) {
+      addLog("⚠️ DV KPIs: could not detect SFMC stack from tab URL.");
+      return;
+    }
+
+    const base = `https://mc.${stack}.exacttarget.com/cloud/fuelapi`;
+
+    // 2. Build SQL
+    const safeId = journeyId.replace(/'/g, "''");
+    let whereClause: string;
+    const isFullGuid = (id: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    if (tsIds.filter(Boolean).length > 0) {
+      const parts     = tsIds.filter(Boolean);
+      const fullGuids = parts.filter(isFullGuid);
+      const partials  = parts.filter(id => !isFullGuid(id));
+      const conditions: string[] = [];
+      if (fullGuids.length > 0) {
+        // _Job stores GUIDs uppercase; SFMC SQL is case-sensitive — always uppercase.
+        const inList = fullGuids.map(id => `'${id.toUpperCase().replace(/'/g, "''")}'`).join(", ");
+        conditions.push(`j.TriggererSendDefinitionObjectID IN (${inList})`);
+      }
+      if (partials.length > 0) {
+        // Journey API sometimes returns only the first 8-char segment of the GUID
+        // e.g. "d6b296fb" instead of "D6B296FB-CF1B-F111-BA67-F40343E97C48"
+        // Use LIKE + uppercase so it matches the full uppercase GUID in _Job.
+        const likeList = partials
+          .map(id => `j.TriggererSendDefinitionObjectID LIKE '%${id.toUpperCase().replace(/'/g, "''")}%'`)
+          .join(" OR ");
+        conditions.push(likeList);
+      }
+      whereClause = conditions.join(" OR ");
+    } else {
+      const safeName = journeyName.replace(/'/g, "''");
+      whereClause = `j.EmailName LIKE '%${safeName}%'`;
+    }
+
+    const sql = [
+      `SELECT '${safeId}' AS JourneyID,`,
+      `  COUNT(DISTINCT s.SubscriberKey) AS Sent,`,
+      `  COUNT(DISTINCT CASE WHEN o.IsUnique = 1 THEN o.SubscriberKey ELSE NULL END) AS UniqueOpens,`,
+      `  COUNT(DISTINCT CASE WHEN c.IsUnique = 1 THEN c.SubscriberKey ELSE NULL END) AS UniqueClicks,`,
+      `  COUNT(DISTINCT b.SubscriberKey) AS Bounces,`,
+      `  COUNT(DISTINCT u.SubscriberKey) AS Unsubscribes`,
+      `FROM _Sent s`,
+      `JOIN _Job j ON s.JobID = j.JobID`,
+      `LEFT JOIN _Open o ON s.JobID = o.JobID AND s.SubscriberKey = o.SubscriberKey`,
+      `LEFT JOIN _Click c ON s.JobID = c.JobID AND s.SubscriberKey = c.SubscriberKey`,
+      `LEFT JOIN _Bounce b ON s.JobID = b.JobID AND s.SubscriberKey = b.SubscriberKey`,
+      `LEFT JOIN _Unsubscribe u ON s.JobID = u.JobID AND s.SubscriberKey = u.SubscriberKey`,
+      `WHERE ${whereClause}`,
+    ].join(" ");
+    addLog(`📊 DV KPIs: SQL WHERE → ${whereClause}`);
+
+    // DE key — existing DE provided by user, no auto-creation needed
+    const tempKey  = "D11D3D3C-5F65-46BE-9742-E691E7B504FC";
+    const queryKey = `SezMon_Q_${Date.now()}`;
+    addLog(`📊 DV KPIs: target DE="${tempKey}", stack=${stack}`);
+
+    try {
+      // 3a. Resolve a valid categoryId from an existing query (required by this SFMC instance)
+      let categoryId: number | undefined;
+      try {
+        const cached = get().cache["sqlQueries"] as Array<Record<string, unknown>>;
+        const withCat = cached?.find(q => q.categoryId != null && Number(q.categoryId) > 0);
+        if (withCat) {
+          categoryId = Number(withCat.categoryId);
+          addLog(`📊 DV KPIs: using cached categoryId=${categoryId}`);
+        } else {
+          const list = await fetchSfmc(
+            `${base}/automation/v1/queries?$page=1&$pageSize=1`, tabId, true
+          ) as Record<string, unknown>;
+          const items = (list?.items || list?.definitions || []) as Array<Record<string, unknown>>;
+          if (items.length > 0 && items[0].categoryId != null) {
+            categoryId = Number(items[0].categoryId);
+            addLog(`📊 DV KPIs: resolved categoryId=${categoryId} from API`);
+          }
+        }
+      } catch { /* proceed without categoryId */ }
+
+      // 3b. Create Query Activity — target DE exists (user-provided key)
+      const createPayload: Record<string, unknown> = {
+        name: queryKey,
+        key: queryKey,
+        description: "SFMC Monitor extension temp query",
+        queryText: sql,
+        targetKey: tempKey,
+        targetName: tempKey,
+        targetUpdateTypeId: 0,
+      };
+      if (categoryId !== undefined && categoryId > 0) createPayload.categoryId = categoryId;
+
+      const created = await fetchSfmcPost(`${base}/automation/v1/queries`, createPayload, tabId) as Record<string, unknown>;
+      const queryId = String(created?.queryDefinitionId || created?.id || "");
+      if (!queryId) {
+        addLog(`⚠️ DV KPIs: failed to create query — ${JSON.stringify(created).slice(0, 200)}`);
+        return;
+      }
+      addLog(`📊 DV KPIs: query created, id=${queryId}`);
+
+      // 3c. Purge stale rows from the target DE before starting.
+      //     targetUpdateTypeId=0 (overwrite) only clears the DE AFTER the new query
+      //     finishes — old rows from a previous run remain during execution.
+      //     By deleting rows now, any row we find while polling is guaranteed fresh.
+      const rowsetUrl = `${base}/data/v1/customobjectdata/key/${tempKey}/rowset`;
+      try {
+        await chrome.runtime.sendMessage({
+          type: "FETCH_SFMC", url: rowsetUrl, method: "DELETE", tabId, silent: true,
+        });
+        addLog("📊 DV KPIs: DE cleared (stale rows removed).");
+      } catch { /* ignore — DE was already empty */ }
+
+      // 4. Start the query
+      await fetchSfmcPost(`${base}/automation/v1/queries/${queryId}/actions/start`, {}, tabId);
+      addLog("📊 DV KPIs: query started — polling DE for results (up to 2 min)…");
+
+      // 5. Poll the target DE directly for rows (24 × 5 s = 120 s max).
+      //    Since we cleared the DE above, any row appearing here is from the new query.
+      let rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 24; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+          const rowsetData = await fetchSfmc(rowsetUrl, tabId, true) as Record<string, unknown>;
+          const found = (rowsetData?.items || rowsetData?.rows || []) as Array<Record<string, unknown>>;
+          addLog(`📊 DV KPIs: poll ${i + 1}/24 — DE has ${found.length} row(s)`);
+          if (found.length > 0) { rows = found; break; }
+        } catch { /* keep retrying on transient errors */ }
+      }
+
+      if (!rows.length) {
+        addLog("⚠️ DV KPIs: no rows in DE after 2 min — this journey may have no email sends recorded in Data Views.");
+        return;
+      }
+
+      // Parse row values.
+      // data/v1/customobjectdata rowset returns items shaped as:
+      //   { keys: {}, values: { Sent: "35", UniqueOpens: "18", ... } }  ← values is an OBJECT
+      // Some older endpoints return an array of {name, value} pairs instead.
+      const row = rows[0] as Record<string, unknown>;
+      const vals: Record<string, string> = {};
+      const rawValues = row?.values;
+      if (Array.isArray(rawValues)) {
+        // Array of {name, value} pairs
+        for (const v of rawValues as Array<{name: string; value: unknown}>) {
+          vals[String(v.name ?? "").toLowerCase()] = String(v.value ?? "0");
+        }
+      } else if (rawValues && typeof rawValues === "object") {
+        // Plain object: { FieldName: "value", ... }
+        for (const [k, v] of Object.entries(rawValues as Record<string, unknown>)) {
+          vals[k.toLowerCase()] = String(v ?? "0");
+        }
+      } else {
+        // Flat row (no nested values key) — iterate row directly
+        for (const [k, v] of Object.entries(row)) {
+          vals[k.toLowerCase()] = String(v ?? "0");
+        }
+      }
+      addLog(`📊 DV KPIs: parsed vals → ${JSON.stringify(vals).slice(0, 200)}`);
+
+      const kpis: import("./types").JourneyKpis = {
+        sent:         parseInt(vals["sent"] || "0", 10),
+        delivered:    parseInt(vals["sent"] || "0", 10),
+        opens:        parseInt(vals["uniqueopens"] || vals["opens"] || "0", 10),
+        uniqueOpens:  parseInt(vals["uniqueopens"] || "0", 10),
+        clicks:       parseInt(vals["uniqueclicks"] || vals["clicks"] || "0", 10),
+        uniqueClicks: parseInt(vals["uniqueclicks"] || "0", 10),
+        bounces:      parseInt(vals["bounces"] || "0", 10),
+        unsubs:       parseInt(vals["unsubscribes"] || vals["unsubs"] || "0", 10),
+      };
+
+      const updated = { ...get().journeyKpis, [journeyId]: kpis };
+      set({ journeyKpis: updated });
+      await chrome.storage.local.set({ sfmcBuddyJourneyKpis: { kpis: updated, savedAt: Date.now() } });
+      addLog(`✅ DV KPIs: sent=${kpis.sent} opens=${kpis.uniqueOpens} clicks=${kpis.uniqueClicks} bounces=${kpis.bounces} unsubs=${kpis.unsubs}`);
+
+    } catch (err) {
+      addLog(`⚠️ DV KPIs error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // 7. Cleanup — delete query activity by its key (best effort)
+      // Note: we keep the target DE (SezMon_KpiTemp) so it can be reused next run
+      try {
+        await chrome.runtime.sendMessage({ type: "FETCH_SFMC", url: `${base}/automation/v1/queries/key:${queryKey}`, method: "DELETE", tabId, silent: true });
+      } catch { /* ignore */ }
+    }
   },
 
   searchJourneyHistory: async (req) => {

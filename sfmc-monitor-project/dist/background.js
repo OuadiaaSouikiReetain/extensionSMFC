@@ -88,6 +88,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "FETCH_SFMC_SOAP") {
+    fetchSfmcSoap(message).then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type === "QUERY_STUDIO_RESULT") {
     storeQueryStudioResult(message.payload).then(() => sendResponse({ ok: true }));
     return true;
@@ -289,34 +294,97 @@ async function fetchSfmcPost({ url, body, tabId }) {
   throw lastError || new Error("POST fetch failed");
 }
 
+async function fetchSfmcSoap({ url, xmlTemplate, tabId }) {
+  // Inject the SOAP POST into the SFMC tab itself (same-origin → no CORS, tab has valid cookies).
+  // The SW cannot reach mc.*.exacttarget.com/Service.asmx directly, but the tab can.
+  const candidates = await findCookieTabCandidates(url, tabId);
+  const candidateTabId = candidates[0];
+  if (!candidateTabId) throw new Error("No SFMC tab found for SOAP request");
+
+  // Extract bearer token to embed in <fueloauth>
+  const tokenHeaders = await getSfmcHeadersFromTab(candidateTabId);
+  const bearerToken = (tokenHeaders.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!bearerToken) throw new Error("Could not extract SFMC bearer token for SOAP request");
+
+  const soapBody = String(xmlTemplate).replace("{{BEARER}}", bearerToken);
+
+  // Run fetch inside the SFMC tab (MAIN world) — same origin, no CSP/CORS issues
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: candidateTabId },
+      world: "MAIN",
+      func: async (soapUrl, body) => {
+        try {
+          const origFetch = window.__sfmcBuddyOrigFetch || window.fetch;
+          const response = await origFetch(soapUrl, {
+            method: "POST",
+            credentials: "include",
+            headers: {
+              "Content-Type": "text/xml; charset=utf-8",
+              "SOAPAction": "Create",
+            },
+            body,
+          });
+          const text = await response.text();
+          return { ok: response.ok, status: response.status, text };
+        } catch (e) {
+          return { ok: false, status: 0, text: "", error: String(e) };
+        }
+      },
+      args: [url, soapBody],
+    });
+  } catch (injErr) {
+    throw new Error(`SOAP script injection failed: ${injErr.message}`);
+  }
+
+  const result = results?.[0]?.result;
+  if (!result) throw new Error("SOAP script injection returned no result");
+  if (result.error) throw new Error(result.error);
+  if (!result.ok) throw new Error(`HTTP ${result.status}: ${result.text.slice(0, 200)}`);
+  return { ok: true, data: { raw: result.text }, status: result.status };
+}
+
 const SFMC_HOST_RE = /exacttarget\.com|marketingcloudapps\.com|marketingcloudapis\.com|exacttargetapis\.com|salesforce\.com/i;
+// Stricter check — only real SFMC MC instances (mc.*, jbinteractions.*, exacttarget.com, marketingcloud*).
+// Excludes help.salesforce.com, trailhead.salesforce.com, etc. which match SFMC_HOST_RE but lack SFMC cookies.
+const SFMC_MC_HOST_RE = /(?:^|\.)(?:mc\.|exacttarget\.com|marketingcloudapps\.com|marketingcloudapis\.com|exacttargetapis\.com)/i;
 
 function isSfmcTab(tab) {
-  try { return tab && Number.isInteger(tab.id) && SFMC_HOST_RE.test(new URL(tab.url).hostname); } catch { return false; }
+  try {
+    const hostname = new URL(tab.url).hostname;
+    return tab && Number.isInteger(tab.id) && (SFMC_MC_HOST_RE.test(hostname) || /mc\.\w/.test(hostname));
+  } catch { return false; }
 }
 
 async function findCookieTabCandidates(url, preferredTabId) {
   const targetOrigin = safeOrigin(url);
   if (!targetOrigin) return [];
+
+  // If a specific tab was requested, always try it first — it's the tab the user is looking at.
+  // Don't restrict to the candidates list; the stored tabId IS the correct SFMC tab.
+  if (preferredTabId) {
+    const tabs = await chrome.tabs.query({});
+    const isSfmcTarget = SFMC_HOST_RE.test(safeHostname(url));
+    let rest;
+    if (isSfmcTarget) {
+      const exactMatch = tabs.filter(t => isSfmcTab(t) && safeOrigin(t.url) === targetOrigin && t.id !== preferredTabId).map(t => t.id);
+      const anyMatch   = tabs.filter(t => isSfmcTab(t) && safeOrigin(t.url) !== targetOrigin && t.id !== preferredTabId).map(t => t.id);
+      rest = [...exactMatch, ...anyMatch];
+    } else {
+      rest = tabs.filter(t => Number.isInteger(t.id) && safeOrigin(t.url) === targetOrigin && t.id !== preferredTabId).map(t => t.id);
+    }
+    return [preferredTabId, ...rest];
+  }
+
   const tabs = await chrome.tabs.query({});
   const isSfmcTarget = SFMC_HOST_RE.test(safeHostname(url));
-
-  // For SFMC API targets: any open SFMC tab can be used because auth tokens
-  // (CSRF, fuel token) live in localStorage and are accessible via script injection.
-  // Exact-origin match is preferred but not required.
-  let candidates;
   if (isSfmcTarget) {
     const exactMatch = tabs.filter(t => isSfmcTab(t) && safeOrigin(t.url) === targetOrigin).map(t => t.id);
     const anyMatch   = tabs.filter(t => isSfmcTab(t) && safeOrigin(t.url) !== targetOrigin).map(t => t.id);
-    candidates = [...exactMatch, ...anyMatch];
-  } else {
-    candidates = tabs.filter(t => Number.isInteger(t.id) && safeOrigin(t.url) === targetOrigin).map(t => t.id);
+    return [...exactMatch, ...anyMatch];
   }
-
-  if (preferredTabId && candidates.includes(preferredTabId)) {
-    return [preferredTabId, ...candidates.filter(id => id !== preferredTabId)];
-  }
-  return candidates;
+  return tabs.filter(t => Number.isInteger(t.id) && safeOrigin(t.url) === targetOrigin).map(t => t.id);
 }
 
 async function getSfmcHeadersFromTab(tabId) {
@@ -472,28 +540,54 @@ async function executeFetchInTab(tabId, url, method, body, silent = false) {
     target: { tabId },
     world: "MAIN",
     func: async (fetchUrl, fetchMethod, fetchBody) => {
-      const readStorage = key => { try { return window.localStorage.getItem(key) || window.sessionStorage.getItem(key); } catch { return null; } };
-      const sanitizeToken = raw => { const v = String(raw || "").trim(); return (!v || v === "null" || v === "undefined") ? null : v; };
-      const findToken = pattern => {
-        for (const storage of [window.localStorage, window.sessionStorage]) {
-          try { for (let i = 0; i < storage.length; i++) { const k = storage.key(i); if (!pattern.test(String(k || ""))) continue; const t = sanitizeToken(storage.getItem(k)); if (t) return t; } } catch { /* ignore */ }
-        }
-        return null;
-      };
-      const headers = { Accept: "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest" };
-      const csrf = sanitizeToken(readStorage("x-csrf-token")) || sanitizeToken(readStorage("csrfToken")) ||
-        sanitizeToken(document.querySelector("meta[name='csrf-token']")?.content) || findToken(/csrf/i);
-      if (csrf) headers["x-csrf-token"] = csrf;
-      const fuelVer = sanitizeToken(readStorage("x-fueldata-version")) || "1.1";
-      if (fuelVer) headers["x-fueldata-version"] = fuelVer;
-      if (fetchBody !== null) headers["Content-Type"] = "application/json";
-      const response = await fetch(fetchUrl, { method: fetchMethod, credentials: "include", headers, body: fetchBody !== null ? JSON.stringify(fetchBody) : undefined });
-      const text = await response.text();
-      return { ok: response.ok, status: response.status, text };
+      try {
+        const readStorage = key => { try { return window.localStorage.getItem(key) || window.sessionStorage.getItem(key); } catch { return null; } };
+        const sanitizeToken = raw => { const v = String(raw || "").trim(); return (!v || v === "null" || v === "undefined") ? null : v; };
+        const findToken = pattern => {
+          for (const storage of [window.localStorage, window.sessionStorage]) {
+            try { for (let i = 0; i < storage.length; i++) { const k = storage.key(i); if (!pattern.test(String(k || ""))) continue; const t = sanitizeToken(storage.getItem(k)); if (t) return t; } } catch { /* ignore */ }
+          }
+          return null;
+        };
+        const extractBearer = raw => {
+          if (!raw) return null;
+          const text = String(raw);
+          const m = text.match(/Bearer\s+([A-Za-z0-9\-_.]+)/i);
+          if (m) return `Bearer ${m[1]}`;
+          const j = text.match(/\b([A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b/);
+          if (j && j[1].length > 40) return `Bearer ${j[1]}`;
+          try { const p = JSON.parse(text); for (const k of ["authorization","accessToken","access_token","token","jwt"]) { const r = extractBearer(p?.[k]); if (r) return r; } } catch { /* */ }
+          return null;
+        };
+        const headers = { Accept: "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest" };
+        // Authorization
+        for (const k of ["token","accessToken","access_token","authToken","authorization","jwt","platformAuthToken"]) { const tok = extractBearer(readStorage(k)); if (tok) { headers.Authorization = tok; break; } }
+        if (!headers.Authorization) { for (const storage of [window.localStorage, window.sessionStorage]) { try { for (let i = 0; i < storage.length; i++) { const k = storage.key(i); const tok = extractBearer(storage.getItem(k)); if (tok) { headers.Authorization = tok; break; } } } catch { /* */ } if (headers.Authorization) break; } }
+        const csrf = sanitizeToken(readStorage("x-csrf-token")) || sanitizeToken(readStorage("csrfToken")) ||
+          sanitizeToken(document.querySelector("meta[name='csrf-token']")?.content) || findToken(/csrf/i);
+        if (csrf) headers["x-csrf-token"] = csrf;
+        const fuelVer = sanitizeToken(readStorage("x-fueldata-version")) || "1.1";
+        if (fuelVer) headers["x-fueldata-version"] = fuelVer;
+        if (fetchBody !== null) headers["Content-Type"] = "application/json";
+        // Use the original unpatched fetch if available (avoids sfmc-hook wrapper issues)
+        const fetchFn = window.__sfmcBuddyOrigFetch || window.fetch;
+        const response = await fetchFn(fetchUrl, { method: fetchMethod, credentials: "include", headers, body: fetchBody !== null ? JSON.stringify(fetchBody) : undefined });
+        const text = await response.text();
+        return { ok: response.ok, status: response.status, text };
+      } catch (e) {
+        return { ok: false, status: 0, text: "", error: String(e?.message || e) };
+      }
     },
     args: [url, method, body]
   });
-  if (!result?.result) throw new Error("Empty script result");
+  if (!result?.result) {
+    const scriptErr = result?.error ? String(result.error.message || result.error) : "unknown";
+    throw new Error(`Script injection failed: ${scriptErr}`);
+  }
+  if (result.result.error && !result.result.ok) {
+    if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: 0, message: result.result.error, capturedAt: Date.now() });
+    throw new Error(`Script fetch error: ${result.result.error}`);
+  }
   const { ok, status, text } = result.result;
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }

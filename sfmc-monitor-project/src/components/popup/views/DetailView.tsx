@@ -48,8 +48,9 @@ function prettifyKey(key: string): string {
 
 function JourneyDetail({ item }: { item: CachedItem }) {
   const [tab, setTab] = useState<"activities" | "goals" | "stats" | "raw">("activities");
-  const { fetchJourneyDetail } = useAppStore();
+  const { fetchJourneyDetail, fetchKpisFromDataViews, journeyKpis } = useAppStore();
   const [fetching, setFetching] = useState(false);
+  const [dvFetching, setDvFetching] = useState(false);
 
   const handleFetchDetail = async () => {
     setFetching(true);
@@ -58,6 +59,23 @@ function JourneyDetail({ item }: { item: CachedItem }) {
   };
 
   const activities: any[] = Array.isArray(item.activities) ? item.activities : [];
+
+  // Extract triggered send IDs from email activities for Data Views query
+  const emailTsIds: string[] = activities
+    .filter(a => /EMAILV2|EMAIL$/i.test(String(a.type || "")))
+    .map(a => {
+      const cfg = a.configurationArguments as Record<string, unknown> | undefined;
+      return String(cfg?.triggeredSendId || cfg?.triggeredSendDefinitionObjectID || "");
+    })
+    .filter(Boolean);
+
+  const dvKpis = journeyKpis[String(item.id)] ?? null;
+
+  const handleFetchDvKpis = async () => {
+    setDvFetching(true);
+    await fetchKpisFromDataViews(String(item.id), String(item.name || ""), emailTsIds);
+    setDvFetching(false);
+  };
   const goals: any[] = Array.isArray(item.goals) ? item.goals : [];
   const stats: Record<string, unknown> = (item.stats && typeof item.stats === "object") ? item.stats as Record<string, unknown> : {};
   const raw: any = item.raw ?? item;
@@ -123,7 +141,7 @@ function JourneyDetail({ item }: { item: CachedItem }) {
   const curPop = journeyCurPop !== null ? journeyCurPop : (actCurPop > 0 ? actCurPop : null);
   const goalMet = stats.goalPercentage       ?? stats.goalsAchieved ?? null;
 
-  const tabs = ["activities", "goals", "stats", "raw"] as const;
+  const tabs = ["activities", "goals", "stats", "info", "raw"] as const;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
@@ -178,36 +196,6 @@ function JourneyDetail({ item }: { item: CachedItem }) {
         </div>
       )}
 
-      {/* Goal progress bar (when available) */}
-      {goalMet !== null && (
-        <div style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ flex: 1, height: 6, background: "var(--bg-elevated)", borderRadius: 3 }}>
-            <div style={{ width: `${Math.min(100, Number(goalMet) || 0)}%`, height: "100%", background: "var(--green)", borderRadius: 3 }} />
-          </div>
-          <span style={{ fontSize: ".72rem", color: "var(--green)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>
-            Goal {Number(goalMet).toFixed(1)}%
-          </span>
-        </div>
-      )}
-
-      {/* Scalar meta fields */}
-      <div className="card" style={{ marginBottom: 14 }}>
-        <div className="card-body" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px", padding: "10px 14px" }}>
-          {(["id","key","customerKey","status","entryMode","definitionType","createdDate","modifiedDate","lastPublishedDate","capturedAt"] as const).map(k => {
-            const val = item[k];
-            if (val === undefined || val === null || val === "") return null;
-            return (
-              <div key={k} style={{ display: "flex", flexDirection: "column", padding: "4px 0", borderBottom: "1px solid var(--border-subtle)" }}>
-                <span style={{ fontSize: ".68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>{prettifyKey(k)}</span>
-                <span style={{ fontSize: ".78rem", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
-                  {k === "capturedAt" || k === "createdDate" || k === "modifiedDate" || k === "lastPublishedDate" ? formatTs(val as string | number) : String(val)}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
       {/* Tab nav */}
       <div style={{ display: "flex", alignItems: "center", borderBottom: "1px solid var(--border-subtle)", marginBottom: 12 }}>
         {tabs.map(t => (
@@ -217,7 +205,7 @@ function JourneyDetail({ item }: { item: CachedItem }) {
             color: tab === t ? "var(--brand)" : "var(--text-muted)",
             borderBottom: tab === t ? "2px solid var(--brand)" : "2px solid transparent",
           }}>
-            {t === "activities" ? `Activities (${activities.length})` : t === "goals" ? `Goals (${goals.length})` : t === "stats" ? `Stats (${statEntries.length})` : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === "activities" ? `Activities (${activities.length})` : t === "goals" ? `Goals (${goals.length})` : t === "stats" ? `Stats` : t === "info" ? "Info" : "Raw"}
           </button>
         ))}
         <button onClick={handleFetchDetail} disabled={fetching} title="Fetch full journey detail from API" style={{
@@ -225,6 +213,19 @@ function JourneyDetail({ item }: { item: CachedItem }) {
           background: "none", cursor: "pointer", fontSize: ".72rem", color: "var(--text-muted)",
         }}>
           {fetching ? "…" : "↻"}
+        </button>
+        <button
+          onClick={handleFetchDvKpis}
+          disabled={dvFetching}
+          title="Fetch email KPIs from Data Views via Query Studio"
+          style={{
+            marginLeft: 6, padding: "3px 10px", border: "1px solid var(--brand)", borderRadius: 4,
+            background: dvKpis ? "var(--brand)" : "none", cursor: dvFetching ? "wait" : "pointer",
+            fontSize: ".72rem", color: dvKpis ? "#fff" : "var(--brand)", fontWeight: 600,
+            opacity: dvFetching ? 0.6 : 1,
+          }}
+        >
+          {dvFetching ? "⏳ DV…" : dvKpis ? "📊 DV ✓" : "📊 DV"}
         </button>
       </div>
 
@@ -388,6 +389,31 @@ function JourneyDetail({ item }: { item: CachedItem }) {
                 </tbody>
               </table>
             </div>
+
+            {/* Data Views KPIs summary banner */}
+            {dvKpis && (
+              <div style={{ padding: "10px 14px", borderRadius: 6, background: "var(--bg-elevated)", border: "1px solid var(--brand)" }}>
+                <div style={{ fontSize: ".68rem", color: "var(--brand)", textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 700, marginBottom: 8 }}>
+                  📊 Email KPIs — Data Views
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: "4px 8px" }}>
+                  {([
+                    ["Sent",    dvKpis.sent,                              "var(--text)"],
+                    ["Opens",   dvKpis.uniqueOpens ?? dvKpis.opens,       "var(--brand)"],
+                    ["Clicks",  dvKpis.uniqueClicks ?? dvKpis.clicks,     "var(--brand)"],
+                    ["Bounces", dvKpis.bounces,                           "var(--red)"],
+                    ["Unsubs",  dvKpis.unsubs,                            "var(--text-muted)"],
+                  ] as [string, unknown, string][]).map(([label, val, color]) => (
+                    <div key={label} style={{ display: "flex", flexDirection: "column", textAlign: "center" }}>
+                      <span style={{ fontSize: ".62rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</span>
+                      <span style={{ fontSize: ".9rem", fontFamily: "var(--font-mono)", fontWeight: 700, color: (val !== undefined && val !== null) ? color : "var(--text-muted)" }}>
+                        {(val !== undefined && val !== null) ? fmtNum(val) : "—"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             </div>
       )}
 
@@ -447,9 +473,44 @@ function JourneyDetail({ item }: { item: CachedItem }) {
         </div>
       )}
 
+      {/* Info tab — meta fields + goal progress */}
+      {tab === "info" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {goalMet !== null && (
+            <div className="card" style={{ padding: "10px 14px" }}>
+              <div style={{ fontSize: ".68rem", color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", marginBottom: 6 }}>Goal Progress</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ flex: 1, height: 6, background: "var(--bg-elevated)", borderRadius: 3 }}>
+                  <div style={{ width: `${Math.min(100, Number(goalMet) || 0)}%`, height: "100%", background: "var(--green)", borderRadius: 3 }} />
+                </div>
+                <span style={{ fontSize: ".78rem", color: "var(--green)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap", fontWeight: 700 }}>
+                  {Number(goalMet).toFixed(1)}%
+                </span>
+              </div>
+            </div>
+          )}
+          <div className="card">
+            <div className="card-body" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px", padding: "10px 14px" }}>
+              {(["id","key","customerKey","status","entryMode","definitionType","createdDate","modifiedDate","lastPublishedDate","capturedAt"] as const).map(k => {
+                const val = item[k];
+                if (val === undefined || val === null || val === "") return null;
+                return (
+                  <div key={k} style={{ display: "flex", flexDirection: "column", padding: "4px 0", borderBottom: "1px solid var(--border-subtle)" }}>
+                    <span style={{ fontSize: ".68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>{prettifyKey(k)}</span>
+                    <span style={{ fontSize: ".78rem", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
+                      {k === "capturedAt" || k === "createdDate" || k === "modifiedDate" || k === "lastPublishedDate" ? formatTs(val as string | number) : String(val)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Raw tab */}
       {tab === "raw" && (
-        <pre className="code-block" style={{ maxHeight: 320, overflow: "auto", fontSize: ".72rem" }}>
+        <pre className="code-block" style={{ maxHeight: 280, overflow: "auto", fontSize: ".72rem" }}>
           {JSON.stringify(raw, null, 2)}
         </pre>
       )}

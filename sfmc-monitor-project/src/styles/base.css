@@ -4,8 +4,9 @@ html {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  min-width: 1180px;
-  min-height: 780px;
+  width: 1020px;
+  height: 680px;
+  overflow: hidden;
 }
 
 body {
@@ -16,15 +17,15 @@ body {
   background:
     radial-gradient(circle at top right, rgba(77, 163, 255, .16), transparent 30%),
     linear-gradient(180deg, #f7fbff 0%, var(--bg-base) 48%, #eef4fb 100%);
-  min-width: 1180px;
-  width: 1180px;
-  min-height: 780px;
-  overflow-x: hidden;
+  width: 1020px;
+  height: 680px;
+  overflow: hidden;
 }
 
 #root {
-  min-width: 1180px;
-  min-height: 780px;
+  width: 1020px;
+  height: 680px;
+  overflow: hidden;
 }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }

@@ -57,6 +57,9 @@
 
   const origFetch = window.fetch.bind(window);
 
+  // Expose the original (unpatched) fetch so extension injected scripts can bypass this wrapper.
+  window.__sfmcBuddyOrigFetch = origFetch;
+
   window.fetch = function (input, init) {
     const url = typeof input === "string" ? input : (input instanceof Request ? input.url : String(input));
     const promise = origFetch(input, init);
@@ -64,9 +67,11 @@
     if (!shouldCapture(url)) return promise;
 
     return promise.then(response => {
-      // Clone so we don't consume the body
-      const clone = response.clone();
-      clone.text().then(text => forward(url, text)).catch(() => null);
+      // Clone so we don't consume the body — guard against already-used bodies
+      try {
+        const clone = response.clone();
+        clone.text().then(text => forward(url, text)).catch(() => null);
+      } catch { /* body already used, skip forwarding */ }
       return response;
     });
   };

@@ -5,10 +5,9 @@
 /* ── Shell layout ─────────────────────────────────────────── */
 .buddy-shell {
   display: grid;
-  grid-template-columns: 270px minmax(0, 1fr);
-  min-height: 780px;
-  height: 780px;
-  width: 1180px;
+  grid-template-columns: 210px minmax(0, 1fr);
+  height: 680px;
+  width: 1020px;
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,255,255,.72)),
@@ -287,8 +286,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px clamp(14px, 2vw, 24px);
-  min-height: 64px;
+  padding: 8px clamp(14px, 2vw, 20px);
+  min-height: 48px;
   background: rgba(255,255,255,.72);
   border-bottom: 1px solid rgba(226, 232, 240, .9);
   backdrop-filter: blur(16px);

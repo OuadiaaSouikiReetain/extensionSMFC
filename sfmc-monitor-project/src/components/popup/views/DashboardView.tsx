@@ -1,35 +1,38 @@
 import React, { useMemo, useState } from "react";
 import { useAppStore } from "../../../store/appStore";
 import { Button } from "../../common/Button";
-import { MetricCard } from "../../common/MetricCard";
 import { Badge } from "../../common/Badge";
 import { EmptyState } from "../../common/EmptyState";
-import { formatNumber, relativeTime, estimateCacheKb, statusVariant } from "../../../utils/formatters";
+import { formatNumber, relativeTime, statusVariant } from "../../../utils/formatters";
 import type { CachedItem, CollectionKey } from "../../../store/types";
 
 const COLL_META: Record<CollectionKey, { label: string; short: string }> = {
-  journeys: { label: "Journeys", short: "JR" },
-  automations: { label: "Automations", short: "AU" },
-  sqlQueries: { label: "SQL Queries", short: "SQL" },
-  dataExtensions: { label: "Data Extensions", short: "DE" },
-  assets: { label: "Assets", short: "AS" },
-  folders: { label: "Folders", short: "FD" },
-  publicationLists: { label: "Publication Lists", short: "PL" },
-  canvasActivities: { label: "Canvas Activities", short: "CV" },
-  errors: { label: "Errors", short: "ER" },
+  journeys:         { label: "Journeys",          short: "JR"  },
+  automations:      { label: "Automations",        short: "AU"  },
+  sqlQueries:       { label: "SQL Queries",        short: "SQL" },
+  dataExtensions:   { label: "Data Extensions",    short: "DE"  },
+  assets:           { label: "Assets",             short: "AS"  },
+  folders:          { label: "Folders",            short: "FD"  },
+  publicationLists: { label: "Publication Lists",  short: "PL"  },
+  canvasActivities: { label: "Canvas Activities",  short: "CV"  },
+  errors:           { label: "Errors",             short: "ER"  },
 };
 
 export function DashboardView() {
   const { cache, updatedAt, activeTab, loading, synchronize, setView, purgeCache, exportSnapshot, addLog } = useAppStore();
-  const [tab, setTab] = useState<"overview" | "journeys" | "automations">("overview");
+  const [tab, setTab] = useState<"collections" | "journeys" | "automations">("collections");
 
-  const totalItems = Object.values(cache).reduce((sum, items) => sum + items.length, 0);
-  const lastSync = Math.max(0, ...Object.values(updatedAt).filter(Number.isFinite));
-  const hasErrors = (cache.errors?.length ?? 0) > 0;
+  const totalItems  = Object.values(cache).reduce((sum, items) => sum + items.length, 0);
+  const lastSync    = Math.max(0, ...Object.values(updatedAt).filter(Number.isFinite));
+  const hasErrors   = (cache.errors?.length ?? 0) > 0;
   const populatedCollections = useMemo(
     () => (Object.keys(COLL_META) as CollectionKey[]).filter((key) => (cache[key]?.length ?? 0) > 0),
     [cache],
   );
+
+  const hostname = (() => {
+    try { return activeTab?.url ? new URL(activeTab.url).hostname : null; } catch { return null; }
+  })();
 
   async function handleExport() {
     const snap = exportSnapshot();
@@ -38,181 +41,192 @@ export function DashboardView() {
   }
 
   return (
-    <div className="buddy-content">
-      <section className="hero-panel">
-        <div className="hero-copy">
-          <div className="hero-eyebrow">Live SFMC workspace</div>
-          <h1 className="hero-title">Monitor journeys, inventory, and content from one responsive console.</h1>
-          <p className="hero-text">
-            Sezane Monitoring reuses the active SFMC session, keeps local collections fresh, and gives you direct access
-            to journeys, data extensions, assets, folders, and automation activity.
-          </p>
-          <div className="hero-actions">
-            <Button variant="primary" loading={loading} onClick={synchronize}>Sync all collections</Button>
-            <Button variant="secondary" size="sm" onClick={() => setView("analytics")}>Open analytics</Button>
-            <Button variant="ghost" size="sm" onClick={handleExport}>Export snapshot</Button>
+    <div className="buddy-content" style={{ display: "flex", flexDirection: "column", gap: 0, padding: "10px 16px", overflowY: "hidden" }}>
+
+      {/* ── Sync bar ───────────────────────────────────────────── */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "7px 12px", marginBottom: 10,
+        background: "var(--bg-surface)", border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-xs)",
+        flexShrink: 0,
+      }}>
+        {/* Session dot */}
+        <div className={`status-dot ${hostname ? "ok" : "unknown"}`} />
+
+        {/* BU info */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: ".78rem", fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {hostname ?? "No SFMC tab detected"}
+          </div>
+          <div style={{ fontSize: ".65rem", color: "var(--text-muted)", marginTop: 1 }}>
+            {totalItems > 0
+              ? `${formatNumber(totalItems)} items · ${populatedCollections.length}/${Object.keys(COLL_META).length} collections`
+              : "Not synced yet"
+            }
+            {lastSync > 0 && <span style={{ marginLeft: 6, color: "var(--success)" }}>· {relativeTime(lastSync)}</span>}
           </div>
         </div>
-        <div className="hero-kpis">
-          <MetricCard label="Cached items" value={formatNumber(totalItems)} variant="brand" sub="Across all local collections" />
-          <MetricCard label="Collections ready" value={formatNumber(populatedCollections.length)} sub={`${Object.keys(COLL_META).length} tracked sources`} />
-          <MetricCard label="Storage footprint" value={`${estimateCacheKb(cache)} KB`} sub="Local popup cache" />
-          <MetricCard label="Last sync" value={lastSync ? relativeTime(lastSync) : "Never"} variant={lastSync ? "success" : "warning"} sub="Based on the active SFMC tab" />
-        </div>
-      </section>
 
-      <section className="session-card">
-        <div className="session-info">
-          <div className="session-title">Active SFMC session</div>
-          <div className="session-subtitle">{activeTab?.url || "Open an SFMC tab to activate synchronization."}</div>
-        </div>
-        {hasErrors ? (
-          <Button variant="danger" size="sm" onClick={() => setView("collection", "errors")}>
-            View {cache.errors.length} errors
-          </Button>
-        ) : (
-          <Badge variant="success">No captured errors</Badge>
-        )}
-      </section>
-
-      <div className="dashboard-tabs">
-        {(["overview", "journeys", "automations"] as const).map((item) => (
-          <button key={item} className={`dashboard-tab${tab === item ? " active" : ""}`} onClick={() => setTab(item)}>
-            {item === "overview" ? "Overview" : item === "journeys" ? "Journey queue" : "Automation queue"}
+        {hasErrors && (
+          <button
+            onClick={() => setView("collection", "errors")}
+            style={{
+              padding: "3px 10px", borderRadius: "var(--radius-pill)",
+              background: "var(--danger-surface)", color: "var(--danger)",
+              border: "1px solid var(--danger-border)", cursor: "pointer",
+              fontSize: ".7rem", fontWeight: 600, whiteSpace: "nowrap",
+            }}
+          >
+            {cache.errors.length} errors
           </button>
-        ))}
+        )}
+
+        <Button variant="ghost" size="sm" onClick={handleExport} title="Copy snapshot to clipboard">Export</Button>
+        <Button variant="primary" size="sm" loading={loading} onClick={synchronize}>Sync all</Button>
       </div>
 
-      {tab === "overview" ? (
+      {/* ── Tab nav ────────────────────────────────────────────── */}
+      <div style={{ display: "flex", alignItems: "center", borderBottom: "1px solid var(--border-subtle)", marginBottom: 10, flexShrink: 0 }}>
+        {(["collections", "journeys", "automations"] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            padding: "6px 14px", border: "none", background: "none", cursor: "pointer",
+            fontSize: ".78rem", fontWeight: tab === t ? 700 : 400,
+            color: tab === t ? "var(--brand)" : "var(--text-muted)",
+            borderBottom: tab === t ? "2px solid var(--brand)" : "2px solid transparent",
+            marginBottom: -1, whiteSpace: "nowrap",
+          }}>
+            {t === "collections"
+              ? "Collections"
+              : t === "journeys"
+                ? `Journeys${(cache.journeys?.length ?? 0) > 0 ? ` (${cache.journeys.length})` : ""}`
+                : `Automations${(cache.automations?.length ?? 0) > 0 ? ` (${cache.automations.length})` : ""}`}
+          </button>
+        ))}
+        <button
+          onClick={() => setView("analytics")}
+          style={{
+            marginLeft: "auto", padding: "6px 12px", border: "none", background: "none",
+            cursor: "pointer", fontSize: ".72rem", color: "var(--text-muted)",
+          }}
+        >
+          Analytics →
+        </button>
+      </div>
+
+      {/* ── Collections grid ───────────────────────────────────── */}
+      {tab === "collections" && (
         <>
-          <div className="section-header">
-            <span className="section-title">Collections</span>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, flexShrink: 0 }}>
+            <span style={{ fontSize: ".72rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+              {populatedCollections.length} / {Object.keys(COLL_META).length} synced
+            </span>
             <Button variant="ghost" size="xs" onClick={() => purgeCache("all")}>Clear all</Button>
           </div>
-          <div className="collection-grid">
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 160px), 1fr))",
+            gap: 8,
+          }}>
             {(Object.keys(COLL_META) as CollectionKey[]).map((key) => {
-              const count = cache[key]?.length ?? 0;
+              const count    = cache[key]?.length ?? 0;
               const maxCount = Math.max(1, ...Object.values(cache).map((items) => items.length));
-              const pct = Math.round((count / maxCount) * 100);
-              const meta = COLL_META[key];
+              const pct      = Math.round((count / maxCount) * 100);
+              const meta     = COLL_META[key];
               return (
-                <div key={key} className="collection-card" onClick={() => setView("collection", key)}>
-                  <div className="collection-chip">{meta.short}</div>
-                  <div className="coll-label">{meta.label}</div>
-                  <div className="coll-count">{formatNumber(count)}</div>
-                  <div className="coll-updated">{updatedAt[key] ? relativeTime(updatedAt[key]) : "Not synced yet"}</div>
-                  <div className="coll-bar-track">
+                <div
+                  key={key}
+                  className="collection-card"
+                  style={{ padding: "9px 11px", cursor: "pointer" }}
+                  onClick={() => setView("collection", key)}
+                >
+                  <div style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    minWidth: 32, height: 32, padding: "0 8px", borderRadius: 9,
+                    background: "var(--brand-surface)", color: "var(--brand)",
+                    fontSize: ".62rem", fontWeight: 700, fontFamily: "var(--font-mono)",
+                    marginBottom: 6,
+                  }}>{meta.short}</div>
+                  <div className="coll-label" style={{ fontSize: ".7rem" }}>{meta.label}</div>
+                  <div className="coll-count" style={{ fontSize: "1.1rem" }}>{formatNumber(count)}</div>
+                  <div className="coll-updated" style={{ fontSize: ".6rem" }}>{updatedAt[key] ? relativeTime(updatedAt[key]) : "Not synced"}</div>
+                  <div className="coll-bar-track" style={{ marginTop: 6 }}>
                     <div className="coll-bar-fill" style={{ width: `${pct}%` }} />
                   </div>
                 </div>
               );
             })}
           </div>
-
-          <div className="section-header" style={{ marginTop: 18 }}>
-            <span className="section-title">Inventory health</span>
-            <Button variant="ghost" size="xs" onClick={() => setView("analytics")}>Open analytics</Button>
-          </div>
-          <div className="table-scroll">
-            <table className="cache-table">
-              <thead>
-                <tr>
-                  <th>Collection</th>
-                  <th>Items</th>
-                  <th>Last updated</th>
-                  <th>Status</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {(Object.keys(COLL_META) as CollectionKey[]).map((key) => (
-                  <tr key={key}>
-                    <td>{COLL_META[key].label}</td>
-                    <td className="text-mono">{formatNumber(cache[key]?.length ?? 0)}</td>
-                    <td>{updatedAt[key] ? relativeTime(updatedAt[key]) : "Never"}</td>
-                    <td>
-                      <Badge variant={(cache[key]?.length ?? 0) > 0 ? "success" : "warning"}>
-                        {(cache[key]?.length ?? 0) > 0 ? "Ready" : "Empty"}
-                      </Badge>
-                    </td>
-                    <td>
-                      <Button variant="ghost" size="xs" onClick={() => setView("collection", key)}>Open</Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </>
-      ) : null}
+      )}
 
-      {tab === "journeys" ? (
+      {/* ── Journey quick list ─────────────────────────────────── */}
+      {tab === "journeys" && (
         <QuickList
-          title="Recent journeys"
           items={cache.journeys}
           columns={["name", "status", "version"]}
           onOpen={(id) => setView("detail", "journeys", id)}
+          emptyMessage="No journeys cached. Run Sync all to fetch them."
         />
-      ) : null}
+      )}
 
-      {tab === "automations" ? (
+      {/* ── Automation quick list ──────────────────────────────── */}
+      {tab === "automations" && (
         <QuickList
-          title="Recent automations"
           items={cache.automations}
           columns={["name", "status", "lastRunStatus", "lastRunTime"]}
           onOpen={(id) => setView("detail", "automations", id)}
+          emptyMessage="No automations cached. Run Sync all to fetch them."
         />
-      ) : null}
+      )}
     </div>
   );
 }
 
 function QuickList({
-  title,
   items,
   onOpen,
   columns,
+  emptyMessage,
 }: {
-  title: string;
   items: CachedItem[];
   onOpen: (id: string) => void;
   columns: string[];
+  emptyMessage: string;
 }) {
   if (!items.length) {
-    return <EmptyState title="No data available" message="Run a synchronization from the dashboard to populate this section." />;
+    return <EmptyState title="No data" message={emptyMessage} />;
   }
 
   return (
-    <>
-      <div className="section-header">
-        <span className="section-title">{title}</span>
-      </div>
-      <div className="table-scroll">
-        <div className="object-table-inner">
-          <div className="object-table-header" style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "140px").join(" ")}` }}>
-            {columns.map((column) => <span key={column}>{column}</span>)}
-          </div>
-          {items.slice(0, 50).map((item, index) => (
-            <div
-              key={String(item.id || index)}
-              className="object-row"
-              style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "140px").join(" ")}` }}
-              onClick={() => onOpen(String(item.id || ""))}
-            >
-              <span className="col-name">{String(item.name || item.id || "-")}</span>
-              {columns.slice(1).map((column) => (
-                <span key={column}>
-                  {column === "status" || column === "lastRunStatus" ? (
-                    <Badge variant={statusVariant(String(item[column] ?? ""))}>{String(item[column] ?? "-")}</Badge>
-                  ) : (
-                    <span className="col-mono">{String(item[column] ?? "-")}</span>
-                  )}
-                </span>
-              ))}
-            </div>
-          ))}
+    <div className="table-scroll">
+      <div className="object-table-inner">
+        <div
+          className="object-table-header"
+          style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "140px").join(" ")}` }}
+        >
+          {columns.map((col) => <span key={col}>{col}</span>)}
         </div>
+        {items.slice(0, 60).map((item, index) => (
+          <div
+            key={String(item.id || index)}
+            className="object-row"
+            style={{ gridTemplateColumns: `1fr ${columns.slice(1).map(() => "140px").join(" ")}` }}
+            onClick={() => onOpen(String(item.id || ""))}
+          >
+            <span className="col-name">{String(item.name || item.id || "—")}</span>
+            {columns.slice(1).map((col) => (
+              <span key={col}>
+                {col === "status" || col === "lastRunStatus" ? (
+                  <Badge variant={statusVariant(String(item[col] ?? ""))}>{String(item[col] ?? "—")}</Badge>
+                ) : (
+                  <span className="col-mono">{String(item[col] ?? "—")}</span>
+                )}
+              </span>
+            ))}
+          </div>
+        ))}
       </div>
-    </>
+    </div>
   );
 }
