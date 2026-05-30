@@ -345,15 +345,17 @@ function JourneyDetail({ item }: { item: CachedItem }) {
                       ?? cntV("unsubscribes") ?? cntV("unsubs") ?? cntV("OptOutCount")
                       ?? cs.unsubscribes ?? meta.statsUnsubs ?? meta.unsubscribes;
 
-                    // Email KPI row always shown for email activities (shows "—" when data not yet fetched)
+                    // Email KPI row — native stats first, dvKpis as fallback
                     const hasEmailKpis = isEmail;
+                    const usingDv = isEmail && dvKpis != null
+                      && sent == null && opens == null && clicks == null;
                     const emailKpiValues: [string, unknown, string][] = [
-                      ["Sent",      sent,      "var(--text)"],
-                      ["Delivered", delivered, "var(--green)"],
-                      ["Opens",     opens,     "var(--brand)"],
-                      ["Clicks",    clicks,    "var(--brand)"],
-                      ["Bounces",   bounces,   "var(--red)"],
-                      ["Unsubs",    unsubs,    "var(--text-muted)"],
+                      ["Sent",      sent      ?? dvKpis?.sent,                           "var(--text)"],
+                      ["Delivered", delivered ?? (dvKpis ? Math.max(0, (dvKpis.sent ?? 0) - (dvKpis.bounces ?? 0)) : null), "var(--green)"],
+                      ["Opens",     opens     ?? dvKpis?.uniqueOpens ?? dvKpis?.opens,   "var(--brand)"],
+                      ["Clicks",    clicks    ?? dvKpis?.uniqueClicks ?? dvKpis?.clicks, "var(--brand)"],
+                      ["Bounces",   bounces   ?? dvKpis?.bounces,                        "var(--red)"],
+                      ["Unsubs",    unsubs    ?? dvKpis?.unsubs,                         "var(--text-muted)"],
                     ];
 
                     return (
@@ -369,7 +371,10 @@ function JourneyDetail({ item }: { item: CachedItem }) {
                         {hasEmailKpis && (
                           <tr style={{ borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-elevated)" }}>
                             <td colSpan={6} style={{ padding: "4px 10px 8px 24px" }}>
-                              <div style={{ fontSize: ".68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 4 }}>Email Performance</div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                                <span style={{ fontSize: ".68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>Email Performance</span>
+                                {usingDv && <span style={{ fontSize: ".6rem", fontWeight: 700, padding: "1px 5px", borderRadius: 4, background: "var(--brand-surface)", color: "var(--brand)" }}>📊 DV</span>}
+                              </div>
                               <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "4px 8px" }}>
                                 {emailKpiValues.map(([label, val, color]) => (
                                   <div key={label as string} style={{ display: "flex", flexDirection: "column" }}>
@@ -390,30 +395,6 @@ function JourneyDetail({ item }: { item: CachedItem }) {
               </table>
             </div>
 
-            {/* Data Views KPIs summary banner */}
-            {dvKpis && (
-              <div style={{ padding: "10px 14px", borderRadius: 6, background: "var(--bg-elevated)", border: "1px solid var(--brand)" }}>
-                <div style={{ fontSize: ".68rem", color: "var(--brand)", textTransform: "uppercase", letterSpacing: ".06em", fontWeight: 700, marginBottom: 8 }}>
-                  📊 Email KPIs — Data Views
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: "4px 8px" }}>
-                  {([
-                    ["Sent",    dvKpis.sent,                              "var(--text)"],
-                    ["Opens",   dvKpis.uniqueOpens ?? dvKpis.opens,       "var(--brand)"],
-                    ["Clicks",  dvKpis.uniqueClicks ?? dvKpis.clicks,     "var(--brand)"],
-                    ["Bounces", dvKpis.bounces,                           "var(--red)"],
-                    ["Unsubs",  dvKpis.unsubs,                            "var(--text-muted)"],
-                  ] as [string, unknown, string][]).map(([label, val, color]) => (
-                    <div key={label} style={{ display: "flex", flexDirection: "column", textAlign: "center" }}>
-                      <span style={{ fontSize: ".62rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</span>
-                      <span style={{ fontSize: ".9rem", fontFamily: "var(--font-mono)", fontWeight: 700, color: (val !== undefined && val !== null) ? color : "var(--text-muted)" }}>
-                        {(val !== undefined && val !== null) ? fmtNum(val) : "—"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
             </div>
       )}
 

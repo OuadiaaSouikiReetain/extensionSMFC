@@ -88,6 +88,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "FETCH_SFMC_PUT") {
+    fetchSfmcPut(message).then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type === "FETCH_SFMC_SOAP") {
     fetchSfmcSoap(message).then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message }));
     return true;
@@ -292,6 +297,16 @@ async function fetchSfmcPost({ url, body, tabId }) {
     try { return await executeFetchInTab(candidateTabId, url, "POST", body); } catch (error) { lastError = error; }
   }
   throw lastError || new Error("POST fetch failed");
+}
+
+async function fetchSfmcPut({ url, body, tabId }) {
+  const candidates = await findCookieTabCandidates(url, tabId);
+  if (!candidates.length) throw new Error(`No open SFMC tab with cookies for ${safeHostname(url)}.`);
+  let lastError = null;
+  for (const candidateTabId of candidates) {
+    try { return await executeFetchInTab(candidateTabId, url, "PUT", body); } catch (error) { lastError = error; }
+  }
+  throw lastError || new Error("PUT fetch failed");
 }
 
 async function fetchSfmcSoap({ url, xmlTemplate, tabId }) {

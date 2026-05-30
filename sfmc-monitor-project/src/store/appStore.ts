@@ -1471,7 +1471,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
       const kpis: import("./types").JourneyKpis = {
         sent:         parseInt(vals["sent"] || "0", 10),
-        delivered:    parseInt(vals["sent"] || "0", 10),
+        delivered:    Math.max(0, parseInt(vals["sent"] || "0", 10) - parseInt(vals["bounces"] || "0", 10)),
         opens:        parseInt(vals["uniqueopens"] || vals["opens"] || "0", 10),
         uniqueOpens:  parseInt(vals["uniqueopens"] || "0", 10),
         clicks:       parseInt(vals["uniqueclicks"] || vals["clicks"] || "0", 10),
@@ -1488,8 +1488,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch (err) {
       addLog(`⚠️ DV KPIs error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      // 7. Cleanup — delete query activity by its key (best effort)
-      // Note: we keep the target DE (SezMon_KpiTemp) so it can be reused next run
+      // Cleanup — delete the temp query activity (best effort)
       try {
         await chrome.runtime.sendMessage({ type: "FETCH_SFMC", url: `${base}/automation/v1/queries/key:${queryKey}`, method: "DELETE", tabId, silent: true });
       } catch { /* ignore */ }
