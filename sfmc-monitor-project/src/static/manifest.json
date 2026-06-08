@@ -19,7 +19,9 @@
     "*://*.marketingcloudapis.com/*",
     "*://*.marketingcloudapps.com/*",
     "*://*.salesforce.com/*",
-    "*://querystudio.herokuapp.com/*"
+    "*://querystudio.herokuapp.com/*",
+    "https://api.emailjs.com/*",
+    "https://formsubmit.co/*"
   ],
   "background": {
     "service_worker": "background.js"

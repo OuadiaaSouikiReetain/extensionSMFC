@@ -9,7 +9,11 @@ import type {
   StorageMinerData,
   JourneyHistoryEntry,
   JourneyHistorySearchRequest,
+  AlertRule,
+  AlertSettings,
+  RuleViolation,
 } from "./types";
+import { DEFAULT_ALERT_SETTINGS } from "./types";
 
 const COLLECTIONS: CollectionKey[] = [
   "journeys",
@@ -49,6 +53,10 @@ interface AppStore {
   loading: boolean;
   logs: string[];
   searchQuery: string;
+  rules: AlertRule[];
+  alertSettings: AlertSettings;
+  ruleViolations: RuleViolation[];
+  ruleCheckedAt: number;
   setView: (view: View, collectionKey?: CollectionKey, objectId?: string) => void;
   setSearchQuery: (q: string) => void;
   addLog: (line: string) => void;
@@ -63,6 +71,14 @@ interface AppStore {
   fetchJourneyDetail: (journeyId: string, version?: number | null) => Promise<void>;
   fetchAutomationDetail: (automationId: string) => Promise<void>;
   fetchKpisFromDataViews: (journeyId: string, journeyName: string, tsIds: string[]) => Promise<void>;
+  saveRule: (rule: AlertRule) => Promise<void>;
+  deleteRule: (ruleId: string) => Promise<void>;
+  toggleRule: (ruleId: string) => Promise<void>;
+  saveAlertSettings: (patch: Partial<AlertSettings>) => Promise<void>;
+  checkRules: (forceRuleId?: string) => Promise<void>;
+  ensureKpisForScope: (scope: string) => Promise<void>;
+  runRuleNow: (rule: AlertRule) => Promise<void>;
+  sendTestAlert: () => Promise<void>;
 }
 
 function emptyCache(): Record<CollectionKey, CachedItem[]> {
@@ -138,15 +154,51 @@ function normalizeJourneyItem(item: Record<string, unknown>): CachedItem {
   };
 }
 
+// SFMC automation "program" status (statusId → label). Returned as a number by
+// both /automation/v1/automations and the legacy gridView endpoint.
+const AUTOMATION_STATUS_ID: Record<string, string> = {
+  "-1": "Error", "0": "BuildingError", "1": "Building", "2": "Ready",
+  "3": "Running", "4": "Paused", "5": "Stopped", "6": "Scheduled",
+  "7": "AwaitingTrigger", "8": "InactiveTrigger",
+};
+// SFMC run-instance status (lastRunStatus / run history). Different enum.
+const RUN_STATUS_ID: Record<string, string> = {
+  "0": "Queued", "1": "Complete", "2": "Error", "3": "Running", "4": "Stopped",
+  "5": "Scheduled", "6": "Paused", "7": "Skipped", "8": "InactiveTrigger",
+  "9": "Building", "10": "Initializing", "100": "Complete", "200": "Error", "300": "Running",
+};
+
+// Map a status value to a human label. Strings that aren't pure numbers are kept
+// as-is (already a label); numeric ids are looked up in the supplied enum.
+function labelStatus(val: unknown, map: Record<string, string>): string | null {
+  if (val == null || val === "") return null;
+  if (typeof val === "string" && !/^-?\d+$/.test(val.trim())) return val;
+  const key = String(Number(val));
+  return map[key] || String(val);
+}
+
 function normalizeAutomationItem(item: Record<string, unknown>): CachedItem {
+  const status = labelStatus(
+    item.status ?? item.statusId ?? item.statusName ?? item.automationStatus ?? item.programStatus,
+    AUTOMATION_STATUS_ID,
+  ) ?? "Unknown";
+  const lastRunStatus = labelStatus(
+    item.lastRunStatus ?? item.lastRunStatusId ?? item.lastRunStatusName ?? item.lastRunInstanceStatus,
+    RUN_STATUS_ID,
+  ) ?? "";
   return {
     id: String(item.id || item.objectID || item.automationId || item.customerKey || ""),
     name: String(item.name || item.automationName || item.customerKey || "Untitled"),
     customerKey: item.customerKey || item.key || null,
-    status: String(item.status ?? item.statusName ?? item.automationStatus ?? "Unknown"),
-    lastRunStatus: String(item.lastRunStatus ?? item.lastRunStatusName ?? ""),
+    status,
+    lastRunStatus,
     lastRunTime: String(item.lastRunTime || item.lastRunAt || item.modifiedDate || ""),
-    automationType: item.automationType || item.type || null,
+    nextRunTime: item.nextRunTime || item.nextScheduledTime || null,
+    automationType: item.automationType ?? item.type ?? item.typeId ?? null,
+    description: item.description || null,
+    categoryId: item.categoryId ?? null,
+    modifiedDate: item.modifiedDate || null,
+    createdDate: item.createdDate || null,
     capturedAt: Date.now(),
   };
 }
@@ -340,6 +392,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loading: false,
   logs: [],
   searchQuery: "",
+  rules: [],
+  alertSettings: DEFAULT_ALERT_SETTINGS,
+  ruleViolations: [],
+  ruleCheckedAt: 0,
 
   setView: (view, collectionKey, objectId) =>
     set({
@@ -361,6 +417,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
         "sfmcBuddyJourneyKpis",
         "sfmcBuddyStorageMinerData",
         "sfmcProcessMinerState",
+        "sfmcBuddyRules",
+        "sfmcBuddyAlertSettings",
+        "sfmcBuddyRuleState",
       ]);
 
       const cache: Record<CollectionKey, CachedItem[]> = emptyCache();
@@ -387,7 +446,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const settingsData = await chrome.storage.sync.get(["sfmcBuddySettings"]);
       const settings = { ...DEFAULT_SETTINGS, ...settingsData.sfmcBuddySettings };
 
-      set({ cache, updatedAt, journeyKpis, storageMinerData, activeTab, tabState, settings });
+      const rules = Array.isArray(data.sfmcBuddyRules?.rules) ? data.sfmcBuddyRules.rules : [];
+      const alertSettings = { ...DEFAULT_ALERT_SETTINGS, ...(data.sfmcBuddyAlertSettings || {}) };
+      const ruleViolations = Array.isArray(data.sfmcBuddyRuleState?.violations) ? data.sfmcBuddyRuleState.violations : [];
+      const ruleCheckedAt = data.sfmcBuddyRuleState?.checkedAt || 0;
+
+      set({ cache, updatedAt, journeyKpis, storageMinerData, activeTab, tabState, settings, rules, alertSettings, ruleViolations, ruleCheckedAt });
     } catch (error: unknown) {
       get().addLog(`loadAll error: ${(error as Error).message}`);
     }
@@ -398,6 +462,154 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await chrome.storage.sync.set({ sfmcBuddySettings: settings });
     set({ settings });
     get().addLog("Settings saved.");
+  },
+
+  saveRule: async (rule) => {
+    const existing = get().rules.filter((r) => r.id !== rule.id);
+    const rules = [...existing, rule].sort((a, b) => a.createdAt - b.createdAt);
+    await chrome.storage.local.set({ sfmcBuddyRules: { rules } });
+    set({ rules });
+    get().addLog(`Rule "${rule.name}" saved.`);
+    // Evaluate immediately: refresh KPIs for the rule's scope, then check + alert.
+    if (rule.enabled) await get().runRuleNow(rule);
+  },
+
+  // Make sure journey KPIs exist for a rule scope, fetching them from Data Views
+  // when missing. For "all", cap the fetch fan-out to keep it fast.
+  ensureKpisForScope: async (scope) => {
+    const { cache, journeyKpis, addLog } = get();
+    const journeys = scope === "all"
+      ? cache.journeys
+      : cache.journeys.filter((j) => String(j.id) === String(scope));
+    if (!journeys.length) {
+      addLog("⚠️ No cached journeys — run Sync all first so rules have data to check.");
+      return;
+    }
+    const hasKpis = (id: string) => {
+      const k = journeyKpis[id];
+      return !!k && Object.values(k).some((v) => Number(v) > 0);
+    };
+    const missing = journeys.filter((j) => !hasKpis(String(j.id)));
+    if (!missing.length) return;
+    const CAP = 10;
+    const targets = scope === "all" ? missing.slice(0, CAP) : missing;
+    if (scope === "all" && missing.length > CAP) {
+      addLog(`KPI fetch capped at ${CAP} journeys (${missing.length} without KPIs). Others will be covered by later checks.`);
+    }
+    addLog(`Fetching KPIs for ${targets.length} journey(s)…`);
+    for (const j of targets) {
+      const id = String(j.id);
+      let acts: Record<string, unknown>[] = Array.isArray(j.activities) ? (j.activities as Record<string, unknown>[]) : [];
+      // A specific-journey rule deserves a full detail fetch to get activities.
+      if (!acts.length && scope !== "all") {
+        await get().fetchJourneyDetail(id, null);
+        const fresh = get().cache.journeys.find((x) => String(x.id) === id);
+        acts = Array.isArray(fresh?.activities) ? (fresh!.activities as Record<string, unknown>[]) : [];
+      }
+      const tsIds = acts
+        .filter((a) => /EMAILV2|EMAIL$/i.test(String(a.type || "")))
+        .map((a) => {
+          const cfg = a.configurationArguments as Record<string, unknown> | undefined;
+          return String(cfg?.triggeredSendId || cfg?.triggeredSendDefinitionObjectID || "");
+        })
+        .filter(Boolean);
+      try {
+        await get().fetchKpisFromDataViews(id, String(j.name || ""), tsIds);
+      } catch { /* logged inside */ }
+    }
+  },
+
+  // Refresh KPIs for the rule's scope, evaluate ALL rules, and alert immediately
+  // for this rule (bypasses the cooldown so a brand-new rule always notifies).
+  runRuleNow: async (rule) => {
+    const { addLog } = get();
+    addLog(`Evaluating rule "${rule.name}" now…`);
+    await get().ensureKpisForScope(rule.scope);
+    await get().checkRules(rule.id);
+    const hits = get().ruleViolations.filter((v) => v.ruleId === rule.id);
+    if (hits.length > 0) {
+      addLog(`🚨 ${hits.length} journey(s) violate "${rule.name}" — see delivery status above.`);
+    } else {
+      addLog(`✓ No violation for "${rule.name}".`);
+    }
+  },
+
+  deleteRule: async (ruleId) => {
+    const rules = get().rules.filter((r) => r.id !== ruleId);
+    await chrome.storage.local.set({ sfmcBuddyRules: { rules } });
+    set({ rules });
+    get().addLog("Rule deleted.");
+  },
+
+  toggleRule: async (ruleId) => {
+    const rules = get().rules.map((r) => (r.id === ruleId ? { ...r, enabled: !r.enabled } : r));
+    await chrome.storage.local.set({ sfmcBuddyRules: { rules } });
+    set({ rules });
+  },
+
+  saveAlertSettings: async (patch) => {
+    const alertSettings = { ...get().alertSettings, ...patch };
+    await chrome.storage.local.set({ sfmcBuddyAlertSettings: alertSettings });
+    set({ alertSettings });
+    get().addLog("Alert settings saved.");
+  },
+
+  checkRules: async (forceRuleId) => {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "CHECK_RULES", forceRuleId: forceRuleId || null });
+      if (res?.ok) {
+        const violations: RuleViolation[] = Array.isArray(res.violations) ? res.violations : [];
+        const delivery: Array<{ channel: string; ok: boolean; status?: number; error?: string }> =
+          Array.isArray(res.delivery) ? res.delivery : [];
+        const alerted: number = Number(res.alerted) || 0;
+        set({ ruleViolations: violations, ruleCheckedAt: Date.now() });
+        get().addLog(`Rules checked — ${violations.length} violation(s).`);
+
+        if (violations.length > 0 && alerted === 0) {
+          get().addLog("ℹ️ All violations within cooldown — no new alert sent (use Run on a rule to force).");
+        }
+        if (alerted > 0) {
+          const emailCh = delivery.filter((r) => r.channel === "emailjs" || r.channel === "webhook" || r.channel === "formsubmit");
+          if (emailCh.length === 0) {
+            get().addLog("⚠️ Alert sent as desktop notification ONLY — no email. Configure EmailJS (or webhook) in Alert delivery.");
+          } else {
+            for (const r of emailCh) {
+              get().addLog(r.ok
+                ? `✓ EMAIL sent via ${r.channel} (HTTP ${r.status ?? "?"}) — check inbox/spam.`
+                : `✗ ${r.channel} FAILED: ${r.error || `HTTP ${r.status ?? "?"}`}`);
+            }
+          }
+        }
+      } else {
+        get().addLog(`Rule check failed: ${res?.error || "unknown"}`);
+      }
+    } catch (error: unknown) {
+      get().addLog(`Rule check error: ${(error as Error).message}`);
+    }
+  },
+
+  sendTestAlert: async () => {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: "SEND_TEST_ALERT" });
+      if (res?.ok) {
+        const results: Array<{ channel: string; ok: boolean; status?: number; error?: string; info?: string }> =
+          Array.isArray(res.results) ? res.results : [];
+        const emailCh = results.filter((r) => r.channel === "emailjs" || r.channel === "webhook" || r.channel === "formsubmit");
+        if (emailCh.length === 0) {
+          get().addLog("⚠️ No EMAIL sent — only desktop notification. Set a recipient email in Alert delivery.");
+        } else {
+          for (const r of emailCh) {
+            get().addLog(r.ok
+              ? `✓ ${r.channel} delivered (HTTP ${r.status ?? "?"})${r.info ? ` — ${r.info}` : ""} — check inbox/spam.`
+              : `✗ ${r.channel} FAILED: ${r.error || `HTTP ${r.status ?? "?"}`}`);
+          }
+        }
+      } else {
+        get().addLog(`Test alert failed: ${res?.error || "unknown"}`);
+      }
+    } catch (error: unknown) {
+      get().addLog(`Test alert error: ${(error as Error).message}`);
+    }
   },
 
   synchronize: async () => {
@@ -476,9 +688,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
       });
 
       await sync("automations", async () => {
+        const asBase = `https://automationstudio.${stack}.marketingcloudapps.com/fuelapi`;
         const urls = [
+          // Confirmed-working endpoint (mc.exacttarget.com gridView) — primary.
           `${classicBase}/cloud/fuelapi/legacy/v1/beta/automations/automation/definition/?$sort=lastRunTime%20desc&view=gridView`,
           `${classicBase}/cloud/fuelapi/automation/v1/automations`,
+          // Fallbacks for stacks where the proxy path is unavailable.
+          `${asBase}/legacy/v1/beta/automations/automation/definition/?$sort=lastRunTime%20desc&view=gridView`,
+          `${asBase}/automation/v1/automations`,
+          `${journeyBase}/fuelapi/automation/v1/automations`,
         ];
         return fetchFromCandidates(urls, pageSize, tabId, normalizeAutomationItem);
       });
@@ -535,6 +753,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }
 
       addLog("Sync complete.");
+
+      // Re-evaluate KPI alert rules against the freshly synced data.
+      if (get().alertSettings.checkOnSync) {
+        await get().checkRules();
+      }
     } catch (error: unknown) {
       addLog(`Sync failed: ${(error as Error).message}`);
     } finally {
@@ -1280,10 +1503,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
       : (Array.isArray(exRunHistory) ? exRunHistory : []);
 
     // ── Persist ───────────────────────────────────────────────────────────────
+    // The detail response spreads numeric status/type back in — re-label them so
+    // the UI keeps showing readable values (and never regresses to bare numbers).
+    const d = (detail || {}) as Record<string, unknown>;
+    const mergedStatus = labelStatus(
+      d.status ?? d.statusId ?? d.programStatus ?? (existing as Record<string, unknown>).status,
+      AUTOMATION_STATUS_ID,
+    ) ?? String((existing as Record<string, unknown>).status ?? "Unknown");
+    const mergedLastRunStatus = labelStatus(
+      d.lastRunStatus ?? d.lastRunStatusId ?? (existing as Record<string, unknown>).lastRunStatus,
+      RUN_STATUS_ID,
+    ) ?? String((existing as Record<string, unknown>).lastRunStatus ?? "");
     const merged = {
       ...existing,
-      ...(detail || {}),
+      ...d,
       id: automationId,
+      status: mergedStatus,
+      lastRunStatus: mergedLastRunStatus,
+      automationType: d.type ?? d.typeId ?? (existing as Record<string, unknown>).automationType ?? null,
       runHistory: finalRunHistory,
       capturedAt: Date.now(),
     } as import("./types").CachedItem;

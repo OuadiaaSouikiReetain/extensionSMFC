@@ -15,8 +15,9 @@ body {
   line-height: 1.5;
   color: var(--text-primary);
   background:
-    radial-gradient(circle at top right, rgba(77, 163, 255, .16), transparent 30%),
-    linear-gradient(180deg, #f7fbff 0%, var(--bg-base) 48%, #eef4fb 100%);
+    radial-gradient(900px 420px at 100% -10%, rgba(59, 130, 246, .10), transparent 60%),
+    radial-gradient(700px 380px at -10% 110%, rgba(30, 64, 175, .07), transparent 60%),
+    var(--bg-base);
   width: 1020px;
   height: 680px;
   overflow: hidden;
@@ -28,10 +29,10 @@ body {
   overflow: hidden;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: var(--radius-pill); }
-::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: var(--radius-pill); border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); background-clip: padding-box; }
 
 a { color: var(--text-accent); text-decoration: none; }
 a:hover { text-decoration: underline; }

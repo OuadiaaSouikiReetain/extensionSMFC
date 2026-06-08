@@ -506,6 +506,27 @@ const AUTO_TYPE_LABEL: Record<string, string> = {
   "scheduled": "Scheduled", "triggered": "Triggered", "filedrop": "File Drop",
 };
 
+// SFMC automation activity objectTypeId → label (Steps tab). Falls back to the
+// raw string activityType/type when not a known id.
+const ACTIVITY_TYPE_LABEL: Record<string, string> = {
+  "42": "Send Email", "43": "Report", "45": "Data Extract", "53": "Filter",
+  "73": "Send Email", "300": "SQL Query", "303": "SQL Query", "423": "Script",
+  "425": "Script", "467": "Verification", "484": "Wait", "725": "File Transfer",
+  "726": "Data Factory Utility", "733": "Fire Event", "749": "Import File",
+  "783": "Refresh Group", "952": "Refresh MobileFilteredList", "1010": "Refresh Predictive",
+  "1101": "Journeys Audience",
+};
+
+function activityTypeLabel(act: Record<string, unknown>): string {
+  const raw = act.activityType ?? act.type ?? act.objectTypeId ?? act.activityObjectTypeId;
+  if (raw == null || raw === "") return "Activity";
+  const s = String(raw);
+  if (ACTIVITY_TYPE_LABEL[s]) return ACTIVITY_TYPE_LABEL[s];
+  // already a readable string (not a bare number) → title-case lightly
+  if (!/^-?\d+$/.test(s)) return s;
+  return `Type ${s}`;
+}
+
 // SFMC automation run statusId → label (legacy API returns numeric ids)
 const RUN_STATUS_ID: Record<number, string> = {
   0: "Queued",
@@ -943,7 +964,7 @@ function AutomationDetail({ item }: { item: CachedItem }) {
                       <span style={{
                         fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase",
                         padding: "2px 7px", borderRadius: 8,
-                        background: "rgba(0,102,204,.12)", color: "var(--brand)",
+                        background: "var(--brand-surface)", color: "var(--brand)",
                       }}>
                         Step {step.stepNumber ?? si + 1}
                       </span>
@@ -964,7 +985,7 @@ function AutomationDetail({ item }: { item: CachedItem }) {
                             {act.name || act.activityName || `Activity ${ai + 1}`}
                           </div>
                           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                            <Badge variant="neutral">{act.activityType || act.type || "—"}</Badge>
+                            <Badge variant="neutral">{activityTypeLabel(act)}</Badge>
                             {act.targetDataExtensionName && (
                               <span style={{ fontSize: ".68rem", color: "var(--text-muted)" }}>
                                 → {act.targetDataExtensionName}

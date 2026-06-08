@@ -9,6 +9,7 @@ import { JourneyHistoryView } from "../components/popup/views/JourneyHistoryView
 import { StorageMinerView } from "../components/popup/views/StorageMinerView";
 import { SettingsView } from "../components/popup/views/SettingsView";
 import { UtilitiesView } from "../components/popup/views/UtilitiesView";
+import { RulesView } from "../components/popup/views/RulesView";
 
 function DebugLog() {
   const logs = useAppStore((state) => state.logs);
@@ -45,6 +46,8 @@ export function PopupApp() {
         return <SettingsView />;
       case "utilities":
         return <UtilitiesView />;
+      case "rules":
+        return <RulesView />;
       default:
         return <DashboardView />;
     }
@@ -81,6 +84,7 @@ function viewTitle(view: string): string {
     analytics: "Analytics",
     "journey-history": "Journey History",
     "storage-miner": "Storage Insights",
+    rules: "Alert Rules",
     settings: "Settings",
     utilities: "Utilities",
   };

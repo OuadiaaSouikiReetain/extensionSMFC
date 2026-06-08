@@ -48,6 +48,12 @@ const Icon = {
       <path d="M6.3 1.4 5.5 3H3.4L2 4.4v1.2l1.4 1.4H2v1.5l1.4 1.4v1.1L3.4 12H5.5l.8 1.6h3.4l.8-1.6H12.6l1.4-1.4v-1.1L14 9.5h-.6L14 8V6.8h-.6L14 5.6V4.4L12.6 3H10.5l-.8-1.6H6.3Z" opacity=".7"/>
     </svg>
   ),
+  Rules: () => (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <path d="M8 1 2 3.4v3.3c0 3 2.3 5.8 6 7.3 3.7-1.5 6-4.3 6-7.3V3.4L8 1Zm0 1.6 4.5 1.8v2.3c0 2.3-1.7 4.5-4.5 5.7C5.2 12.2 3.5 10 3.5 7.7V4.4L8 2.6Z"/>
+      <path d="M7.3 8.6 5.9 7.2l-1 1L7.3 10.6l3.8-3.8-1-1-2.8 2.8Z"/>
+    </svg>
+  ),
   // Collections
   Journeys: () => (
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -115,6 +121,7 @@ const NAV: NavItem[] = [
   { id: "analytics",       label: "Analytics",        icon: Icon.Analytics },
   { id: "journey-history", label: "Journey History",  icon: Icon.JourneyHistory },
   { id: "storage-miner",   label: "Storage Insights", icon: Icon.StorageMiner },
+  { id: "rules",           label: "Alert Rules",      icon: Icon.Rules },
   { id: "utilities",       label: "Utilities",        icon: Icon.Utilities },
   { id: "settings",        label: "Settings",         icon: Icon.Settings },
 ];
@@ -146,7 +153,13 @@ export function Sidebar() {
       <div className="brand-block">
         <div className="brand-logo-wrap">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <rect width="24" height="24" rx="6" fill="#0066cc"/>
+            <defs>
+              <linearGradient id="brandLogo" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                <stop stopColor="#3b82f6"/>
+                <stop offset="1" stopColor="#1e40af"/>
+              </linearGradient>
+            </defs>
+            <rect width="24" height="24" rx="6" fill="url(#brandLogo)"/>
             <path d="M6 8h8M6 12h12M6 16h6" stroke="#fff" strokeWidth="2" strokeLinecap="round"/>
           </svg>
           {loading && <span className="brand-spinner" />}

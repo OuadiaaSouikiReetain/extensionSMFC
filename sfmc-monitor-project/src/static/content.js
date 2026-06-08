@@ -426,7 +426,7 @@
     if (document.getElementById("sfmc-buddy-style")) return;
     const style = document.createElement("style");
     style.id = "sfmc-buddy-style";
-    style.textContent = `.sfmc-buddy-activity-key{display:inline-flex;margin:0 0 4px 0;padding:2px 6px;border-radius:999px;background:#0066cc;color:#fff;font:700 10px/1.4 system-ui,sans-serif;z-index:9999}.sfmc-buddy-inline-id{display:inline-flex;margin-left:8px;padding:2px 6px;border-radius:999px;background:rgba(0,102,204,.14);color:#0066cc;font:700 11px/1.4 system-ui,sans-serif}`;
+    style.textContent = `.sfmc-buddy-activity-key{display:inline-flex;margin:0 0 4px 0;padding:2px 6px;border-radius:999px;background:#1e40af;color:#fff;font:700 10px/1.4 "Fira Sans",system-ui,sans-serif;z-index:9999}.sfmc-buddy-inline-id{display:inline-flex;margin-left:8px;padding:2px 6px;border-radius:999px;background:rgba(30,64,175,.12);color:#1e40af;font:700 11px/1.4 "Fira Sans",system-ui,sans-serif}`;
     document.documentElement.appendChild(style);
   }
 

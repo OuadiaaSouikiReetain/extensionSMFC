@@ -9,16 +9,19 @@ chrome.runtime.onInstalled.addListener(() => {
     if (!data[STORAGE_KEY]) chrome.storage.local.set({ [STORAGE_KEY]: defaultState });
   });
   chrome.alarms.create("purge", { periodInMinutes: 60 });
+  chrome.alarms.create("sfmcRulesCheck", { periodInMinutes: 30 });
   purgeOldData();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create("purge", { periodInMinutes: 60 });
+  chrome.alarms.create("sfmcRulesCheck", { periodInMinutes: 30 });
   purgeOldData();
 });
 
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === "purge") purgeOldData();
+  if (alarm.name === "sfmcRulesCheck") checkRules().catch(() => null);
 });
 
 // ── SFMC hook: receive intercepted XHR/fetch payloads from sfmc-hook.js ──────
@@ -29,6 +32,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleInteractionPayload(tabId, message.url, message.json).catch(() => null);
   sendResponse({ ok: true });
   return true;
+});
+
+// ── Alert rules (KPI monitoring) ────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "CHECK_RULES") {
+    checkRules(message.forceRuleId || null)
+      .then(result => sendResponse({ ok: true, violations: result.violations, delivery: result.delivery, alerted: result.alerted }))
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message?.type === "SEND_TEST_ALERT") {
+    sendTestAlert()
+      .then(result => sendResponse({ ok: true, ...result }))
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  return false;
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -501,10 +521,12 @@ async function executeFetchInBackground(tabId, url, method, body, silent = false
   const headers = {
     Accept: "application/json, text/javascript, */*; q=0.01",
     "X-Requested-With": "XMLHttpRequest",
+    // Legacy automation endpoints (automation/definition/.../history, gridView)
+    // require this header — always send it (default 1.1) so it's never dropped.
+    "x-fueldata-version": tokenHeaders.fuelDataVersion || "1.1",
   };
   if (tokenHeaders.authorization) headers.Authorization = tokenHeaders.authorization;
   if (tokenHeaders.csrfToken) headers["x-csrf-token"] = tokenHeaders.csrfToken;
-  if (tokenHeaders.fuelDataVersion) headers["x-fueldata-version"] = tokenHeaders.fuelDataVersion;
   if (body !== null && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json;charset=UTF-8";
   }
@@ -898,6 +920,236 @@ function mergeItems(existing, incoming) {
 
 function notify(title, message) {
   try { chrome.notifications.create({ type: "basic", iconUrl: chrome.runtime.getURL("icons/icon48.png"), title: `Sezane Monitoring - ${title}`, message: String(message || "").slice(0, 180) }); } catch { /* ignore */ }
+}
+
+// ── Alert rules engine ───────────────────────────────────────────────────────
+
+const DEFAULT_ALERT_SETTINGS = {
+  recipient: "ahmed.ouadiaa@reetain.com",
+  webhookUrl: "", emailjsServiceId: "", emailjsTemplateId: "", emailjsPublicKey: "",
+  notifyDesktop: true, checkOnSync: true, cooldownMinutes: 60,
+};
+
+const METRIC_LABEL = {
+  bounceRate: "Bounce rate", openRate: "Open rate", clickRate: "Click rate",
+  unsubRate: "Unsub rate", deliveryRate: "Delivery rate",
+  bounces: "Bounces", sent: "Sent", delivered: "Delivered",
+  opens: "Opens", clicks: "Clicks", unsubs: "Unsubscribes",
+};
+const RATE_METRICS = new Set(["bounceRate", "openRate", "clickRate", "unsubRate", "deliveryRate"]);
+
+function deriveMetricValue(kpi, metric) {
+  const sent = Number(kpi.sent || 0);
+  const delivered = Number(kpi.delivered || 0);
+  const opens = Number(kpi.uniqueOpens || kpi.opens || 0);
+  const clicks = Number(kpi.uniqueClicks || kpi.clicks || 0);
+  const bounces = Number(kpi.bounces || 0);
+  const unsubs = Number(kpi.unsubs || 0);
+  const pct = (num, den) => (den > 0 ? (num / den) * 100 : 0);
+  switch (metric) {
+    case "bounceRate":   return pct(bounces, sent);
+    case "deliveryRate": return pct(delivered, sent);
+    case "openRate":     return pct(opens, delivered || sent);
+    case "clickRate":    return pct(clicks, delivered || sent);
+    case "unsubRate":    return pct(unsubs, delivered || sent);
+    case "bounces":      return bounces;
+    case "sent":         return sent;
+    case "delivered":    return delivered;
+    case "opens":        return opens;
+    case "clicks":       return clicks;
+    case "unsubs":       return unsubs;
+    default:             return 0;
+  }
+}
+
+function compareOp(actual, op, threshold) {
+  switch (op) {
+    case ">":  return actual >  threshold;
+    case ">=": return actual >= threshold;
+    case "<":  return actual <  threshold;
+    case "<=": return actual <= threshold;
+    case "==": return actual === threshold;
+    default:   return false;
+  }
+}
+
+function fmtMetricValue(metric, value) {
+  const rounded = Math.round(value * 100) / 100;
+  return RATE_METRICS.has(metric) ? `${rounded}%` : String(rounded);
+}
+
+// Evaluate all enabled rules against the cached journey KPIs.
+function evaluateRules(rules, kpis, journeys) {
+  const nameById = {};
+  for (const j of (journeys || [])) nameById[String(j.id)] = j.name || j.id;
+  const violations = [];
+  for (const [journeyId, kpi] of Object.entries(kpis || {})) {
+    if (!kpi || typeof kpi !== "object") continue;
+    const journeyName = nameById[journeyId] || journeyId;
+    for (const rule of rules) {
+      if (!rule.enabled) continue;
+      if (rule.scope !== "all" && String(rule.scope) !== journeyId) continue;
+      const actual = deriveMetricValue(kpi, rule.metric);
+      if (compareOp(actual, rule.operator, Number(rule.threshold))) {
+        violations.push({
+          ruleId: rule.id, ruleName: rule.name, journeyId, journeyName,
+          metric: rule.metric, operator: rule.operator, threshold: Number(rule.threshold),
+          actual, detectedAt: Date.now(),
+        });
+      }
+    }
+  }
+  return violations;
+}
+
+function buildAlertText(violations) {
+  const lines = violations.map(v =>
+    `• "${v.journeyName}" — ${METRIC_LABEL[v.metric] || v.metric} is ${fmtMetricValue(v.metric, v.actual)} ` +
+    `(rule "${v.ruleName}": ${METRIC_LABEL[v.metric] || v.metric} ${v.operator} ${RATE_METRICS.has(v.metric) ? v.threshold + "%" : v.threshold})`
+  );
+  const subject = `[SFMC Alert] ${violations.length} KPI rule${violations.length === 1 ? "" : "s"} breached`;
+  const body = `The following journey KPI rule(s) were breached:\n\n${lines.join("\n")}\n\n— Sezane Monitoring`;
+  return { subject, body };
+}
+
+async function deliverAlert(settings, subject, body, violations) {
+  const results = [];
+  let emailDelivered = false;
+  // 1. EmailJS (CORS-enabled, no backend) — sends a real email.
+  if (settings.emailjsServiceId && settings.emailjsTemplateId && settings.emailjsPublicKey) {
+    try {
+      const res = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          service_id: settings.emailjsServiceId,
+          template_id: settings.emailjsTemplateId,
+          user_id: settings.emailjsPublicKey,
+          template_params: { to_email: settings.recipient, subject, message: body },
+        }),
+      });
+      const errText = res.ok ? "" : String(await res.text().catch(() => "")).slice(0, 140);
+      results.push({ channel: "emailjs", ok: res.ok, status: res.status, error: errText || undefined });
+      if (res.ok) emailDelivered = true;
+    } catch (e) { results.push({ channel: "emailjs", ok: false, error: String(e.message || e) }); }
+  }
+  // 1b. FormSubmit fallback — zero-setup email relay straight to the recipient.
+  // FormSubmit rejects chrome-extension:// origins, so the POST is executed in
+  // the context of an open SFMC tab (a real https origin). First-ever send
+  // triggers a one-time activation email that the recipient must confirm.
+  if (!emailDelivered && settings.recipient) {
+    try {
+      const r = await formsubmitViaTab(settings.recipient, subject, body);
+      results.push(r);
+    } catch (e) { results.push({ channel: "formsubmit", ok: false, error: String(e.message || e) }); }
+  }
+  // 2. Generic webhook (Zapier/Make/custom) — POST JSON.
+  if (settings.webhookUrl) {
+    try {
+      const res = await fetch(settings.webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: settings.recipient, subject, body, violations }),
+      });
+      results.push({ channel: "webhook", ok: res.ok, status: res.status });
+    } catch (e) { results.push({ channel: "webhook", ok: false, error: String(e.message || e) }); }
+  }
+  // 3. Desktop notification (always available).
+  if (settings.notifyDesktop !== false) {
+    notify("KPI alert", subject);
+    results.push({ channel: "notification", ok: true });
+  }
+  return results;
+}
+
+// Find any open SFMC tab to host page-context requests.
+async function findAnySfmcTab() {
+  const tabs = await chrome.tabs.query({
+    url: ["*://*.exacttarget.com/*", "*://*.marketingcloudapps.com/*", "*://*.marketingcloudapis.com/*", "*://*.salesforce.com/*"],
+  });
+  return tabs.find(t => Number.isInteger(t.id)) || null;
+}
+
+// POST to FormSubmit from a real https page origin (SFMC tab). FormSubmit
+// refuses chrome-extension:// origins ("browsed as HTML files" error).
+async function formsubmitViaTab(recipient, subject, body) {
+  const tab = await findAnySfmcTab();
+  if (!tab) {
+    return { channel: "formsubmit", ok: false, error: "No SFMC tab open — open Marketing Cloud, then retry" };
+  }
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    func: async (to, subj, msg) => {
+      try {
+        const fetchFn = window.__sfmcBuddyOrigFetch || window.fetch;
+        const res = await fetchFn(`https://formsubmit.co/ajax/${encodeURIComponent(to)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ _subject: subj, name: "Sezane Monitoring", message: msg }),
+        });
+        const text = await res.text();
+        return { ok: res.ok, status: res.status, text };
+      } catch (e) { return { ok: false, status: 0, text: "", error: String(e?.message || e) }; }
+    },
+    args: [recipient, subject, body],
+  });
+  const r = result?.result;
+  if (!r) return { channel: "formsubmit", ok: false, error: "Script injection failed" };
+  if (r.error) return { channel: "formsubmit", ok: false, error: r.error };
+  let j = {};
+  try { j = JSON.parse(r.text); } catch { /* non-JSON body */ }
+  const ok = r.ok && String(j?.success) !== "false";
+  return {
+    channel: "formsubmit", ok, status: r.status,
+    error: ok ? undefined : String(j?.message || r.text || `HTTP ${r.status}`).slice(0, 180),
+    info: String(j?.message || "").slice(0, 180) || undefined,
+  };
+}
+
+async function checkRules(forceRuleId = null) {
+  const store = await chrome.storage.local.get([
+    "sfmcBuddyRules", "sfmcBuddyAlertSettings", "sfmcBuddyJourneyKpis", "sfmcBuddyCache", "sfmcBuddyRuleState",
+  ]);
+  const rules = Array.isArray(store.sfmcBuddyRules?.rules) ? store.sfmcBuddyRules.rules : [];
+  const settings = { ...DEFAULT_ALERT_SETTINGS, ...(store.sfmcBuddyAlertSettings || {}) };
+  const kpis = store.sfmcBuddyJourneyKpis?.kpis || {};
+  const journeys = store.sfmcBuddyCache?.cache?.journeys || [];
+  const ruleState = store.sfmcBuddyRuleState || { violations: [], lastAlerted: {} };
+  const lastAlerted = ruleState.lastAlerted || {};
+
+  const violations = evaluateRules(rules, kpis, journeys);
+
+  // Only alert for violations past the cooldown window (avoid spamming).
+  // forceRuleId bypasses the cooldown for that rule (used right after rule creation).
+  const now = Date.now();
+  const cooldownMs = Math.max(1, Number(settings.cooldownMinutes) || 60) * 60_000;
+  const toAlert = violations.filter(v => {
+    if (forceRuleId && v.ruleId === forceRuleId) return true;
+    const key = `${v.ruleId}:${v.journeyId}`;
+    return !lastAlerted[key] || (now - lastAlerted[key]) > cooldownMs;
+  });
+
+  let delivery = [];
+  if (toAlert.length > 0 && (settings.recipient || settings.webhookUrl || settings.notifyDesktop !== false)) {
+    const { subject, body } = buildAlertText(toAlert);
+    delivery = await deliverAlert(settings, subject, body, toAlert);
+    for (const v of toAlert) lastAlerted[`${v.ruleId}:${v.journeyId}`] = now;
+  }
+
+  await chrome.storage.local.set({
+    sfmcBuddyRuleState: { violations, lastAlerted, checkedAt: now, lastDelivery: delivery },
+  });
+  return { violations, delivery, alerted: toAlert.length };
+}
+
+async function sendTestAlert() {
+  const store = await chrome.storage.local.get(["sfmcBuddyAlertSettings"]);
+  const settings = { ...DEFAULT_ALERT_SETTINGS, ...(store.sfmcBuddyAlertSettings || {}) };
+  const subject = "[SFMC Alert] Test alert";
+  const body = `This is a test alert from Sezane Monitoring.\nIf you received this, alerting is configured correctly.\n\nRecipient: ${settings.recipient || "(none)"}`;
+  const results = await deliverAlert(settings, subject, body, []);
+  return { results };
 }
 
 function sanitizeHostPath(rawUrl) { try { const url = new URL(rawUrl); return `${url.hostname}${url.pathname}`; } catch { return String(rawUrl || "").slice(0, 160); } }

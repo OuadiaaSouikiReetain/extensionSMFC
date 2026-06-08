@@ -81,6 +81,59 @@ export interface JourneyKpis {
   unsubs: number;
 }
 
+// ── Alert rules (KPI monitoring) ──────────────────────────────────────────────
+
+export type RuleMetric =
+  | "bounceRate" | "openRate" | "clickRate" | "unsubRate" | "deliveryRate"
+  | "bounces" | "sent" | "delivered" | "opens" | "clicks" | "unsubs";
+
+export type RuleOperator = ">" | ">=" | "<" | "<=" | "==";
+
+export interface AlertRule {
+  id: string;
+  name: string;
+  scope: "all" | string;          // "all" journeys, or a specific journeyId
+  metric: RuleMetric;
+  operator: RuleOperator;
+  threshold: number;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export interface AlertSettings {
+  recipient: string;              // email address for alerts
+  webhookUrl: string;             // optional: POST JSON here (Zapier/Make/custom)
+  emailjsServiceId: string;       // optional: EmailJS service id
+  emailjsTemplateId: string;      // optional: EmailJS template id
+  emailjsPublicKey: string;       // optional: EmailJS public key
+  notifyDesktop: boolean;         // also raise a desktop notification
+  checkOnSync: boolean;           // re-evaluate rules after every Sync
+  cooldownMinutes: number;        // min minutes between repeat alerts per rule+journey
+}
+
+export const DEFAULT_ALERT_SETTINGS: AlertSettings = {
+  recipient: "ahmed.ouadiaa@reetain.com",
+  webhookUrl: "",
+  emailjsServiceId: "",
+  emailjsTemplateId: "",
+  emailjsPublicKey: "",
+  notifyDesktop: true,
+  checkOnSync: true,
+  cooldownMinutes: 60,
+};
+
+export interface RuleViolation {
+  ruleId: string;
+  ruleName: string;
+  journeyId: string;
+  journeyName: string;
+  metric: RuleMetric;
+  operator: RuleOperator;
+  threshold: number;
+  actual: number;
+  detectedAt: number;
+}
+
 // ── Journey History (POST /interaction/v1/interactions/journeyhistory/search) ─
 
 export interface JourneyHistorySearchRequest {
@@ -267,4 +320,5 @@ export type View =
   | "analytics"
   | "utilities"
   | "journey-history"
-  | "storage-miner";
+  | "storage-miner"
+  | "rules";
