@@ -12,8 +12,10 @@ import type {
   AlertRule,
   AlertSettings,
   RuleViolation,
+  AutomationKpis,
 } from "./types";
 import { DEFAULT_ALERT_SETTINGS } from "./types";
+import { deriveAutomationKpis } from "../utils/automationKpis";
 
 const COLLECTIONS: CollectionKey[] = [
   "journeys",
@@ -57,6 +59,8 @@ interface AppStore {
   alertSettings: AlertSettings;
   ruleViolations: RuleViolation[];
   ruleCheckedAt: number;
+  automationKpis: Record<string, AutomationKpis>;
+  automationKpiProgress: { done: number; total: number } | null;
   setView: (view: View, collectionKey?: CollectionKey, objectId?: string) => void;
   setSearchQuery: (q: string) => void;
   addLog: (line: string) => void;
@@ -69,7 +73,9 @@ interface AppStore {
   importSnapshot: (data: unknown) => Promise<void>;
   searchJourneyHistory: (req: JourneyHistorySearchRequest) => Promise<void>;
   fetchJourneyDetail: (journeyId: string, version?: number | null) => Promise<void>;
-  fetchAutomationDetail: (automationId: string) => Promise<void>;
+  fetchAutomationDetail: (automationId: string, opts?: { silent?: boolean }) => Promise<void>;
+  refreshAllAutomationKpis: (cap?: number) => Promise<void>;
+  fetchQueryDetail: (queryId: string) => Promise<void>;
   fetchKpisFromDataViews: (journeyId: string, journeyName: string, tsIds: string[]) => Promise<void>;
   saveRule: (rule: AlertRule) => Promise<void>;
   deleteRule: (ruleId: string) => Promise<void>;
@@ -100,6 +106,14 @@ async function fetchSfmc(url: string, tabId?: number, silent?: boolean): Promise
 async function fetchSfmcJb(url: string, tabId?: number, silent?: boolean): Promise<unknown> {
   const res = await chrome.runtime.sendMessage({ type: "FETCH_SFMC_JB", url, tabId, silent: !!silent });
   if (!res?.ok) throw new Error(res?.error || "JB fetch failed");
+  return res.data;
+}
+
+// Fetch through the Automation Studio iframe (same-origin) — required for the
+// legacy /automations/.../history endpoint (CORS-blocked from the top page).
+async function fetchSfmcAs(url: string, tabId?: number, silent?: boolean): Promise<unknown> {
+  const res = await chrome.runtime.sendMessage({ type: "FETCH_SFMC_AS", url, tabId, silent: !!silent });
+  if (!res?.ok) throw new Error(res?.error || "AS fetch failed");
   return res.data;
 }
 
@@ -177,6 +191,25 @@ function labelStatus(val: unknown, map: Record<string, string>): string | null {
   return map[key] || String(val);
 }
 
+// Map the gridView's `processes[]` (steps, each with workerCounts → activities)
+// into the shape the Steps tab + activity-count aggregation expect.
+function mapAutomationSteps(item: Record<string, unknown>): Record<string, unknown>[] | null {
+  const processes = Array.isArray(item.processes) ? item.processes as Record<string, unknown>[] : null;
+  if (!processes) return null;
+  return processes.map((p, i) => ({
+    stepNumber: (Number(p.sequence) || i) + 1,
+    name: String(p.name || `Step ${i + 1}`),
+    status: labelStatus(p.status, RUN_STATUS_ID) ?? String(p.status ?? ""),
+    activities: (Array.isArray(p.workerCounts) ? p.workerCounts as Record<string, unknown>[] : []).map(w => ({
+      name: String(w.name || w.activityName || ""),
+      activityType: w.objectTypeId ?? w.activityType ?? null,
+      objectTypeId: w.objectTypeId ?? null,
+      count: w.count ?? null,
+      status: w.status ?? null,
+    })),
+  }));
+}
+
 function normalizeAutomationItem(item: Record<string, unknown>): CachedItem {
   const status = labelStatus(
     item.status ?? item.statusId ?? item.statusName ?? item.automationStatus ?? item.programStatus,
@@ -186,6 +219,7 @@ function normalizeAutomationItem(item: Record<string, unknown>): CachedItem {
     item.lastRunStatus ?? item.lastRunStatusId ?? item.lastRunStatusName ?? item.lastRunInstanceStatus,
     RUN_STATUS_ID,
   ) ?? "";
+  const steps = mapAutomationSteps(item);
   return {
     id: String(item.id || item.objectID || item.automationId || item.customerKey || ""),
     name: String(item.name || item.automationName || item.customerKey || "Untitled"),
@@ -193,12 +227,20 @@ function normalizeAutomationItem(item: Record<string, unknown>): CachedItem {
     status,
     lastRunStatus,
     lastRunTime: String(item.lastRunTime || item.lastRunAt || item.modifiedDate || ""),
-    nextRunTime: item.nextRunTime || item.nextScheduledTime || null,
+    nextRunTime: item.nextRunTime || item.nextScheduledTime || item.scheduledTime || null,
     automationType: item.automationType ?? item.type ?? item.typeId ?? null,
     description: item.description || null,
     categoryId: item.categoryId ?? null,
     modifiedDate: item.modifiedDate || null,
     createdDate: item.createdDate || null,
+    // Rich gridView fields powering the KPIs (no extra fetch needed).
+    ...(steps ? { steps } : {}),
+    startTime: item.startTime ?? null,
+    completedTime: item.completedTime ?? null,
+    scheduledTime: item.scheduledTime ?? null,
+    instanceId: item.instanceId ?? null,
+    schedule: typeof item.schedule === "string" ? item.schedule : (item.schedule ?? null),
+    notifications: Array.isArray(item.notifications) ? item.notifications : null,
     capturedAt: Date.now(),
   };
 }
@@ -396,6 +438,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   alertSettings: DEFAULT_ALERT_SETTINGS,
   ruleViolations: [],
   ruleCheckedAt: 0,
+  automationKpis: {},
+  automationKpiProgress: null,
 
   setView: (view, collectionKey, objectId) =>
     set({
@@ -420,6 +464,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         "sfmcBuddyRules",
         "sfmcBuddyAlertSettings",
         "sfmcBuddyRuleState",
+        "sfmcBuddyAutomationKpis",
       ]);
 
       const cache: Record<CollectionKey, CachedItem[]> = emptyCache();
@@ -450,8 +495,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const alertSettings = { ...DEFAULT_ALERT_SETTINGS, ...(data.sfmcBuddyAlertSettings || {}) };
       const ruleViolations = Array.isArray(data.sfmcBuddyRuleState?.violations) ? data.sfmcBuddyRuleState.violations : [];
       const ruleCheckedAt = data.sfmcBuddyRuleState?.checkedAt || 0;
+      const automationKpis = data.sfmcBuddyAutomationKpis?.kpis || {};
 
-      set({ cache, updatedAt, journeyKpis, storageMinerData, activeTab, tabState, settings, rules, alertSettings, ruleViolations, ruleCheckedAt });
+      set({ cache, updatedAt, journeyKpis, storageMinerData, activeTab, tabState, settings, rules, alertSettings, ruleViolations, ruleCheckedAt, automationKpis });
     } catch (error: unknown) {
       get().addLog(`loadAll error: ${(error as Error).message}`);
     }
@@ -741,12 +787,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
         return fetchFromCandidates(urls, pageSize, tabId, normalizeFolderItem);
       });
 
+      // Refresh automation KPIs' last-run fields from the freshly synced list,
+      // preserving run-derived metrics (totalRuns, durations…) from detail fetches.
+      const akpis = { ...get().automationKpis };
+      for (const a of cache["automations"]) {
+        const id = String(a.id);
+        const fresh = deriveAutomationKpis([], { lastRunStatus: a.lastRunStatus as string, lastRunTime: a.lastRunTime as string });
+        const prev = akpis[id];
+        akpis[id] = prev && prev.totalRuns > 0
+          ? { ...prev, lastRunStatus: fresh.lastRunStatus || prev.lastRunStatus, lastRunAt: fresh.lastRunAt ?? prev.lastRunAt, hoursSinceLastRun: fresh.hoursSinceLastRun ?? prev.hoursSinceLastRun, computedAt: Date.now() }
+          : fresh;
+      }
+
       const tabStateRes = await chrome.runtime.sendMessage({ type: "PANEL_GET_STATE", tabId });
-      set({ cache, updatedAt, tabState: tabStateRes?.state || null, activeTab });
+      set({ cache, updatedAt, tabState: tabStateRes?.state || null, activeTab, automationKpis: akpis });
 
       try {
         await chrome.storage.local.set({
           sfmcBuddyCache: { cache, updatedAt, savedAt: Date.now() },
+          sfmcBuddyAutomationKpis: { kpis: akpis, savedAt: Date.now() },
         });
       } catch (error: unknown) {
         addLog(`Cache persistence warning: ${(error as Error).message}`);
@@ -1388,8 +1447,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ cache: newCache, updatedAt });
   },
 
-  fetchAutomationDetail: async (automationId) => {
+  fetchAutomationDetail: async (automationId, opts) => {
     const { addLog, cache } = get();
+    const dbg = (m: string) => { if (!opts?.silent) addLog(m); };
     // Always resolve a fresh tab — the stored activeTab may be stale
     const resolvedTab = await resolveSfmcTab() || get().activeTab;
     if (!resolvedTab?.id || !resolvedTab.url || !isSfmcUrl(resolvedTab.url)) {
@@ -1410,7 +1470,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const ex         = existing as Record<string, unknown>;
     const customerKey = String(ex.customerKey || "");
 
-    addLog(`Fetching automation detail: ${automationId}…`);
+    dbg(`Fetching automation detail: ${automationId}…`);
 
     // ── Full automation detail (steps, schedule, notifications) ──────────────
     let detail: Record<string, unknown> | null = null;
@@ -1428,7 +1488,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const data = await fetchSfmc(url, tabId) as Record<string, unknown>;
         if (data?.id || data?.name || Array.isArray(data?.steps)) {
           detail = data;
-          addLog(`Automation detail fetched from ${url.split("/").slice(-3).join("/")}`);
+          dbg(`Automation detail fetched from ${url.split("/").slice(-3).join("/")}`);
+          dbg(`detail keys: ${Object.keys(data).join(", ")}`);
           break;
         }
       } catch { /* try next */ }
@@ -1463,25 +1524,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
       `${base}/legacy/v1/beta/automations/runs?automationId=${automationId}&$pageSize=100`,
     ];
 
-    addLog(`Runs: ${runUrls.length} candidates for ${automationId.slice(0,8)}…`);
+    dbg(`Runs: ${runUrls.length} candidates for ${automationId.slice(0,8)}…`);
     for (const url of runUrls) {
       const tag = url.replace(/^https?:\/\/[^/]+\/cloud\/fuelapi\//, "").split("?")[0];
       try {
-        const data = await fetchSfmc(url, tabId, true) as unknown;
+        // automationstudio host must go through its iframe (same-origin) — a direct
+        // fetch from the mc.exacttarget.com page is CORS-blocked ("Failed to fetch").
+        const useAs = url.startsWith(asDirectBase);
+        const data = await (useAs ? fetchSfmcAs(url, tabId, true) : fetchSfmc(url, tabId, true)) as unknown;
         const raw  = data as Record<string, unknown>;
         let items  = extractArray(data);
         if (!items.length && Array.isArray(raw?.runs))    items = raw.runs    as Record<string, unknown>[];
         if (!items.length && Array.isArray(raw?.history)) items = raw.history as Record<string, unknown>[];
         if (items.length > 0) {
           runs = items as Record<string, unknown>[];
-          addLog(`✓ ${runs.length} runs ← ${tag}`);
-          addLog(`fields: ${Object.keys(runs[0]).join(" | ")}`);
-          addLog(`sample: ${JSON.stringify(runs[0]).slice(0, 400)}`);
+          dbg(`✓ ${runs.length} runs ← ${tag}`);
+          dbg(`fields: ${Object.keys(runs[0]).join(" | ")}`);
+          dbg(`sample: ${JSON.stringify(runs[0]).slice(0, 400)}`);
           break;
         }
-        addLog(`○ 0 items ← ${tag} [${Object.keys(raw).slice(0,5).join(",")}]`);
+        dbg(`○ 0 items ← ${tag} [${Object.keys(raw).slice(0,5).join(",")}]`);
       } catch (err) {
-        addLog(`✗ ${tag}: ${(err as Error).message?.slice(0, 60)}`);
+        dbg(`✗ ${tag}: ${(err as Error).message?.slice(0, 60)}`);
       }
     }
 
@@ -1491,7 +1555,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       Object.keys(r).length <= 5 &&
       !Object.keys(r).some(k => /status/i.test(k) && r[k] != null);
     const validRuns = runs.filter(r => !isStepItem(r));
-    addLog(`valid runs: ${validRuns.length}/${runs.length}`);
+    dbg(`valid runs: ${validRuns.length}/${runs.length}`);
 
     const exRunHistory = (existing as Record<string, unknown>).runHistory;
     const existingIsStale = Array.isArray(exRunHistory) &&
@@ -1530,10 +1594,95 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (idx >= 0) newCache["automations"] = newCache["automations"].map((a, i) => i === idx ? merged : a);
     else newCache["automations"] = [merged, ...newCache["automations"]];
 
+    // Derive & persist full per-automation KPIs from the resolved run history.
+    const kpi = deriveAutomationKpis(finalRunHistory, {
+      lastRunStatus: mergedLastRunStatus,
+      lastRunTime: String(merged.lastRunTime || ""),
+    });
+    const automationKpis = { ...get().automationKpis, [automationId]: kpi };
+
     const updatedAt = { ...get().updatedAt, automations: Date.now() };
+    await chrome.storage.local.set({
+      sfmcBuddyCache: { cache: newCache, updatedAt, savedAt: Date.now() },
+      sfmcBuddyAutomationKpis: { kpis: automationKpis, savedAt: Date.now() },
+    });
+    set({ cache: newCache, updatedAt, automationKpis });
+    dbg(`Automation "${String(detail?.name || automationId)}" — ${kpi.totalRuns} run(s), ${kpi.successRate ?? "—"}% success, last ${kpi.lastRunStatus || "—"}.`);
+  },
+
+  refreshAllAutomationKpis: async (cap = 25) => {
+    const { addLog } = get();
+    const list = get().cache["automations"];
+    if (!list.length) { addLog("No automations cached — run Sync all first."); return; }
+    const targets = list.slice(0, cap);
+    if (list.length > cap) addLog(`Refreshing KPIs for first ${cap} of ${list.length} automations…`);
+    else addLog(`Refreshing KPIs for ${targets.length} automation(s)…`);
+    set({ automationKpiProgress: { done: 0, total: targets.length } });
+    for (let i = 0; i < targets.length; i++) {
+      try { await get().fetchAutomationDetail(String(targets[i].id), { silent: true }); } catch { /* skip */ }
+      set({ automationKpiProgress: { done: i + 1, total: targets.length } });
+    }
+    set({ automationKpiProgress: null });
+    addLog(`Automation KPIs refreshed for ${targets.length} automation(s).`);
+  },
+
+  // Fetch the real SQL text + target Data Extension for a query activity.
+  fetchQueryDetail: async (queryId) => {
+    const { addLog, cache } = get();
+    const resolvedTab = await resolveSfmcTab() || get().activeTab;
+    if (!resolvedTab?.id || !resolvedTab.url || !isSfmcUrl(resolvedTab.url)) {
+      addLog("No active SFMC tab — open SFMC first.");
+      return;
+    }
+    if (resolvedTab !== get().activeTab) set({ activeTab: resolvedTab });
+    const stack = getStack(resolvedTab.url);
+    if (!stack) { addLog("Cannot detect SFMC stack."); return; }
+
+    const tabId = resolvedTab.id;
+    const base   = `https://mc.${stack}.exacttarget.com/cloud/fuelapi`;
+    const asBase = `https://automationstudio.${stack}.marketingcloudapps.com/fuelapi`;
+    const existing = cache["sqlQueries"].find(q => String(q.id) === queryId) || {};
+    const ex = existing as Record<string, unknown>;
+    const customerKey = String(ex.customerKey || "");
+
+    const urls = [
+      `${base}/automation/v1/queries/${queryId}`,
+      `${asBase}/automation/v1/queries/${queryId}`,
+      ...(customerKey ? [
+        `${base}/automation/v1/queries/key:${customerKey}`,
+        `${asBase}/automation/v1/queries/key:${customerKey}`,
+      ] : []),
+    ];
+
+    addLog(`Fetching SQL query detail: ${queryId.slice(0, 8)}…`);
+    let detail: Record<string, unknown> | null = null;
+    for (const url of urls) {
+      try {
+        const data = await fetchSfmc(url, tabId, true) as Record<string, unknown>;
+        if (data && (data.queryText || data.queryDefinitionId || data.name)) { detail = data; break; }
+      } catch { /* try next */ }
+    }
+    if (!detail) { addLog(`Query detail fetch failed for ${queryId.slice(0, 8)}.`); return; }
+
+    const merged = {
+      ...existing,
+      ...detail,
+      id: queryId,
+      queryText: (detail.queryText ?? ex.queryText ?? null) as string | null,
+      targetName: (detail.targetName ?? detail.targetKey ?? ex.targetName ?? null) as string | null,
+      targetUpdateType: (detail.targetUpdateTypeName ?? detail.targetUpdateType ?? ex.targetUpdateType ?? null) as string | null,
+      capturedAt: Date.now(),
+    } as import("./types").CachedItem;
+
+    const newCache = { ...get().cache };
+    const idx = newCache["sqlQueries"].findIndex(q => String(q.id) === queryId);
+    if (idx >= 0) newCache["sqlQueries"] = newCache["sqlQueries"].map((q, i) => i === idx ? merged : q);
+    else newCache["sqlQueries"] = [merged, ...newCache["sqlQueries"]];
+
+    const updatedAt = { ...get().updatedAt, sqlQueries: Date.now() };
     await chrome.storage.local.set({ sfmcBuddyCache: { cache: newCache, updatedAt, savedAt: Date.now() } });
     set({ cache: newCache, updatedAt });
-    addLog(`Automation "${String(detail?.name || automationId)}" — raw:${runs.length} valid:${validRuns.length} final:${finalRunHistory.length} run(s) cached.`);
+    addLog(`Query "${String(detail.name || queryId)}" — ${detail.queryText ? `${String(detail.queryText).length} chars SQL` : "no SQL returned"}.`);
   },
 
   fetchKpisFromDataViews: async (journeyId, journeyName, tsIds) => {

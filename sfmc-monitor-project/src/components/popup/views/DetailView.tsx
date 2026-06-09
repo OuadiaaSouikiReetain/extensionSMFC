@@ -4,6 +4,7 @@ import { Button } from "../../common/Button";
 import { Badge } from "../../common/Badge";
 import { EmptyState } from "../../common/EmptyState";
 import { formatTs, statusVariant } from "../../../utils/formatters";
+import { deriveAutomationKpis, formatDuration, lastRunRows } from "../../../utils/automationKpis";
 import type { CachedItem, CollectionKey } from "../../../store/types";
 
 const LABELS: Record<CollectionKey, string> = {
@@ -834,9 +835,11 @@ function AutomationDetail({ item }: { item: CachedItem }) {
     }))
   );
 
-  // Auto-fetch on first open if no valid run history
+  // The gridView already provides steps + last-run data; only auto-fetch when we
+  // have nothing at all (avoids spamming the always-404 run-history endpoint).
+  const hasGridData = Array.isArray(item.steps) || !!item.lastRunStatus || !!item.startTime;
   useEffect(() => {
-    if (runHistory.length > 0 || fetchingRef.current) return;
+    if (runHistory.length > 0 || hasGridData || fetchingRef.current) return;
     fetchingRef.current = true;
     setFetching(true);
     fetchAutomationDetail(String(item.id)).finally(() => {
@@ -852,28 +855,26 @@ function AutomationDetail({ item }: { item: CachedItem }) {
     fetchAutomationDetail(String(item.id)).finally(() => setFetching(false));
   };
 
-  // ── Run stats ──────────────────────────────────────────────────────────────
-  const totalRuns   = runHistory.length;
-  const errorRuns   = runHistory.filter(r => /error|fail/i.test(resolveRunStatus(r))).length;
-  const successRuns = runHistory.filter(r => /complet|success/i.test(resolveRunStatus(r))).length;
-  const lastRunStart = findAnyDate(runHistory[0] ?? {});
-  // Fallback last-run date from list cache (always available)
-  const lastRunDisplay = lastRunStart
-    ? formatTs(lastRunStart)
-    : (item.lastRunTime ? formatTs(item.lastRunTime as string) : "—");
-  // Status label for "last run" KPI — from list cache
-  const lastStatus = (item as Record<string,unknown>).lastRunStatus as string | undefined;
+  // ── Run stats — captured history if any, else the gridView's last-run sample ──
+  const displayRuns: Record<string, unknown>[] = runHistory.length ? runHistory : lastRunRows(item as Record<string, unknown>);
+  const isLastRunOnly = runHistory.length === 0 && displayRuns.length > 0;
+  const kpi = deriveAutomationKpis(displayRuns, { lastRunStatus: item.lastRunStatus as string, lastRunTime: item.lastRunTime as string });
+  const totalRuns   = kpi.totalRuns;
+  const errorRuns   = kpi.errorRuns;
+  const successRuns = kpi.successRuns;
+  const lastRunDisplay = kpi.lastRunAt ? formatTs(kpi.lastRunAt) : "—";
 
   const tabs = ["runs", "steps", "info", "raw"] as const;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
       {/* KPI row */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8, marginBottom: 12 }}>
         {[
           { label: "Total Runs", value: totalRuns > 0 ? String(totalRuns) : (fetching ? "…" : "—"), color: "var(--brand)" },
-          { label: "Success",    value: totalRuns > 0 ? String(successRuns) : "—",  color: "var(--green)" },
+          { label: "Success rate", value: kpi.successRate != null ? `${kpi.successRate}%` : "—", color: "var(--green)" },
           { label: "Errors",     value: totalRuns > 0 ? String(errorRuns)   : "—",  color: errorRuns > 0 ? "var(--red)" : "var(--text-muted)" },
+          { label: "Avg duration", value: formatDuration(kpi.avgDurationSec), color: "var(--text)" },
           { label: "Last Run",   value: lastRunDisplay, color: "var(--text)" },
         ].map(({ label, value, color }) => (
           <div key={label} className="card" style={{ padding: "8px 10px", textAlign: "center" }}>
@@ -919,24 +920,26 @@ function AutomationDetail({ item }: { item: CachedItem }) {
 
       {/* ── Runs tab ── */}
       {tab === "runs" && (
-        runHistory.length === 0
+        displayRuns.length === 0
           ? (
             <div style={{ textAlign: "center", padding: 28, display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
               <div style={{ color: "var(--text-muted)", fontSize: ".8rem" }}>
-                {fetching ? "Fetching run history…" : "No run history available."}
+                {fetching ? "Fetching…" : "No run data — sync automations first."}
               </div>
-              {!fetching && (
-                <Button variant="primary" size="sm" onClick={handleRefresh}>
-                  Fetch Run History
-                </Button>
-              )}
             </div>
           ) : (
-            <div className="card" style={{ overflow: "hidden" }}>
-              {runHistory.map((run, i) => (
-                <RunRow key={String(run.id || i)} run={run} idx={i} />
-              ))}
-            </div>
+            <>
+              {isLastRunOnly && (
+                <div className="text-muted" style={{ fontSize: ".68rem", marginBottom: 8 }}>
+                  Showing the latest run (from the automation list). SFMC blocks full run-history access outside its own UI.
+                </div>
+              )}
+              <div className="card" style={{ overflow: "hidden" }}>
+                {displayRuns.map((run, i) => (
+                  <RunRow key={String(run.id || i)} run={run} idx={i} />
+                ))}
+              </div>
+            </>
           )
       )}
 
@@ -1110,6 +1113,91 @@ function GenericDetail({ item }: { item: CachedItem }) {
   );
 }
 
+// ── SQL Query detail ──────────────────────────────────────────────────────────
+
+function SqlQueryDetail({ item }: { item: CachedItem }) {
+  const { fetchQueryDetail } = useAppStore();
+  const [fetching, setFetching] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const fetchingRef = useRef(false);
+
+  const sql = typeof item.queryText === "string" ? (item.queryText as string) : "";
+  const target = (item.targetName || item.targetKey || (item as any).targetDataExtensionName) as string | undefined;
+  const updateType = (item.targetUpdateType || (item as any).targetUpdateTypeName) as string | undefined;
+
+  // Auto-fetch the SQL when it isn't cached yet.
+  useEffect(() => {
+    if (sql || fetchingRef.current) return;
+    fetchingRef.current = true;
+    setFetching(true);
+    fetchQueryDetail(String(item.id)).finally(() => { fetchingRef.current = false; setFetching(false); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id]);
+
+  const handleRefresh = () => {
+    if (fetching) return;
+    setFetching(true);
+    fetchQueryDetail(String(item.id)).finally(() => setFetching(false));
+  };
+
+  const handleCopy = async () => {
+    if (!sql) return;
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard blocked */ }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Meta */}
+      <div className="card">
+        <div className="card-body" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px", padding: "10px 14px" }}>
+          {([
+            ["Target Data Extension", target || null],
+            ["Update type", updateType || null],
+            ["Status", item.status || null],
+            ["Customer Key", item.customerKey || null],
+            ["Modified", item.modifiedDate ? formatTs(item.modifiedDate as string) : null],
+            ["Query ID", item.id || null],
+          ] as [string, unknown][]).filter(([, v]) => v != null && v !== "").map(([k, v]) => (
+            <div key={k} style={{ display: "flex", flexDirection: "column", padding: "4px 0", borderBottom: "1px solid var(--border-subtle)" }}>
+              <span style={{ fontSize: ".68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>{k}</span>
+              <span style={{ fontSize: ".78rem", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{String(v)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* SQL */}
+      <div className="card" style={{ overflow: "hidden" }}>
+        <div className="card-header">
+          <span className="card-title">SQL Query{sql ? ` · ${sql.length} chars` : ""}</span>
+          <div className="card-actions">
+            <Button variant="ghost" size="xs" onClick={handleRefresh} loading={fetching} title="Re-fetch from SFMC">↻</Button>
+            <Button variant={copied ? "secondary" : "primary"} size="xs" onClick={handleCopy} disabled={!sql}>
+              {copied ? "✓ Copied" : "Copy SQL"}
+            </Button>
+          </div>
+        </div>
+        <div className="card-body" style={{ padding: sql ? 0 : undefined }}>
+          {sql ? (
+            <pre className="code-block" style={{ maxHeight: 360, margin: 0, border: "none", borderRadius: 0 }}>{sql}</pre>
+          ) : (
+            <div style={{ textAlign: "center", padding: 24, display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+              <span className="text-muted" style={{ fontSize: ".8rem" }}>
+                {fetching ? "Fetching SQL…" : "SQL not loaded."}
+              </span>
+              {!fetching && <Button variant="primary" size="sm" onClick={handleRefresh}>Fetch SQL</Button>}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export function DetailView() {
@@ -1148,7 +1236,8 @@ export function DetailView() {
 
       {collection === "journeys"     && <JourneyDetail item={item} />}
       {collection === "automations"  && <AutomationDetail item={item} />}
-      {collection !== "journeys" && collection !== "automations" && <GenericDetail item={item} />}
+      {collection === "sqlQueries"   && <SqlQueryDetail item={item} />}
+      {collection !== "journeys" && collection !== "automations" && collection !== "sqlQueries" && <GenericDetail item={item} />}
     </div>
   );
 }

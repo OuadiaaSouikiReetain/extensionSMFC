@@ -103,6 +103,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "FETCH_SFMC_AS") {
+    fetchSfmcFromAutomationStudio(message).then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type === "FETCH_SFMC_POST") {
     fetchSfmcPost(message).then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message }));
     return true;
@@ -306,6 +311,105 @@ async function fetchSfmcFromJbinteractions({ url, tabId, silent = false }) {
     } catch { /* fall through to regular fetch */ }
   }
   return fetchSfmcWithCookies({ url, tabId, silent });
+}
+
+// Find the Automation Studio iframe frame (same-origin host for the legacy
+// /automations/.../history endpoint, which 404s on the mc proxy and is
+// CORS-blocked from the top mc.exacttarget.com page).
+async function getAutomationStudioFrame(tabId) {
+  try {
+    return await new Promise(resolve => {
+      chrome.webNavigation.getAllFrames({ tabId }, frames => {
+        const f = (frames || []).find(fr => /automationstudio\.[^/]*marketingcloudapps\.com/i.test(fr.url || ""));
+        resolve(f || null);
+      });
+    });
+  } catch { return null; }
+}
+
+// Fetch an automationstudio URL. The legacy /history endpoint is served only by
+// the automationstudio host, which the SFMC UI calls CROSS-ORIGIN from the
+// mc.exacttarget.com page using ONLY cookies + x-fueldata-version +
+// x-requested-with (no Authorization). Adding Authorization/csrf headers trips
+// the CORS preflight → "Failed to fetch". So we replicate that minimal request
+// in the page context. (If the automationstudio iframe is present we use it
+// first — same-origin, any headers are fine.)
+async function fetchSfmcFromAutomationStudio({ url, tabId, silent = false }) {
+  const frame = tabId ? await getAutomationStudioFrame(tabId) : null;
+  if (frame) {
+    try {
+      const payload = await chrome.tabs.sendMessage(tabId, { type: "SFMC_BUDDY_FETCH_JSON", url }, { frameId: frame.frameId });
+      if (payload && !payload.error && payload.ok) {
+        let data; try { data = JSON.parse(payload.text); } catch { data = { raw: payload.text }; }
+        return { ok: true, data, status: payload.status };
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Direct service-worker fetch — NOT subject to the page's CSP/CORS (host
+  // permissions cover *.marketingcloudapps.com), and sends the host's cookies.
+  // Minimal headers, no Authorization — mirrors the SFMC UI request.
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      credentials: "include",
+      headers: {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Fueldata-Version": "1.1",
+      },
+    });
+    const text = await res.text();
+    if (res.ok) {
+      let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      return { ok: true, data, status: res.status };
+    }
+    // A non-ok here is a real server answer (e.g. 404/401) — record and stop.
+    if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: res.status, message: String(text || "").slice(0, 500), capturedAt: Date.now() });
+    throw new Error(`HTTP ${res.status}: ${String(text || "").slice(0, 180)}`);
+  } catch (e) {
+    // Network/opaque failure → fall through to a page-context attempt.
+    if (/HTTP \d/.test(String(e && e.message))) throw e;
+  }
+
+  // Minimal-header cross-origin fetch from an SFMC page (mc.exacttarget.com),
+  // mirroring exactly what the SFMC UI sends.
+  const targetTabId = tabId || (await findAnySfmcTab())?.id;
+  if (!targetTabId) return { ok: false, error: "No SFMC tab open — open Marketing Cloud / Automation Studio" };
+
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: targetTabId },
+    world: "MAIN",
+    func: async (fetchUrl) => {
+      try {
+        const f = window.__sfmcBuddyOrigFetch || window.fetch;
+        const res = await f(fetchUrl, {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Fueldata-Version": "1.1",
+          },
+        });
+        const text = await res.text();
+        return { ok: res.ok, status: res.status, text };
+      } catch (e) { return { ok: false, status: 0, text: "", error: String(e?.message || e) }; }
+    },
+    args: [url],
+  });
+  const r = result?.result;
+  if (!r) return { ok: false, error: "Script injection failed" };
+  if (r.error) {
+    if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: 0, message: r.error, capturedAt: Date.now() });
+    throw new Error(`AS fetch error: ${r.error}`);
+  }
+  let data; try { data = JSON.parse(r.text); } catch { data = { raw: r.text }; }
+  if (!r.ok) {
+    if (!silent) storeGlobalError({ url: sanitizeHostPath(url), fullUrl: url, status: r.status, message: String(r.text || "").slice(0, 500), capturedAt: Date.now() });
+    throw new Error(`HTTP ${r.status}: ${String(r.text || "").slice(0, 180)}`);
+  }
+  return { ok: true, data, status: r.status };
 }
 
 // NEW: POST fetch with JSON body — used for Journey History search
@@ -651,6 +755,7 @@ function shouldTraceUrl(url, mode) {
 
 async function handleInteractionPayload(tabId, url, json) {
   await storeCapturedCollection(url, json);
+  await captureAutomationRuns(url, json);
   if (isJourneyInteractionUrl(url) && Array.isArray(json?.items)) {
     await updateJourneyList(tabId, json.items);
     appendDebug(tabId, `Journey list captured: ${json.items.length} item(s).`);
@@ -676,6 +781,38 @@ async function storeCapturedCollection(url, json) {
   await updateBuddyCollection(collection, items, sanitizeHostPath(url));
 }
 
+// Passively capture an automation's run history from SFMC's OWN network calls
+// (intercepted by sfmc-hook.js). This avoids the CORS/cookie wall that blocks a
+// direct fetch to the automationstudio host — it's SFMC's authenticated request.
+async function captureAutomationRuns(url, json) {
+  const m = String(url || "").match(/\/automation(?:s)?\/(?:automation\/definition|v1\/automations)\/([^/?]+)\/(history|runs|runhistory)\b/i);
+  if (!m) return;
+  const rawId = decodeURIComponent(m[1]).replace(/^key:/i, "");
+  // Extract run rows, ignoring sparse step objects ({id, step:N}).
+  const runs = extractItems(json).filter(r =>
+    r && typeof r === "object" &&
+    !(typeof r.step === "number" && Object.keys(r).length <= 5 && !Object.keys(r).some(k => /status/i.test(k) && r[k] != null))
+  );
+  if (!runs.length) return;
+
+  const data = await chrome.storage.local.get(["sfmcBuddyCache"]);
+  const current = data.sfmcBuddyCache || { cache: {}, updatedAt: {} };
+  const list = current.cache?.automations || [];
+  const idx = list.findIndex(a =>
+    String(a.id) === rawId ||
+    String(a.customerKey) === rawId ||
+    (a.id && String(a.id).includes(rawId)) ||
+    (rawId && rawId.includes(String(a.id)))
+  );
+  if (idx < 0) return; // automation not synced yet — nothing to attach to
+
+  list[idx] = { ...list[idx], runHistory: runs, capturedAt: Date.now() };
+  current.cache = { ...current.cache, automations: list };
+  current.updatedAt = { ...current.updatedAt, automations: Date.now() };
+  await chrome.storage.local.set({ sfmcBuddyCache: current });
+  notify("Automation runs captured", `${runs.length} run(s) · ${list[idx].name || rawId}`);
+}
+
 function inferCollectionFromUrl(url) {
   const u = String(url || "").toLowerCase();
   if (/\/interaction\/v1\/interactions/.test(u)) return "journeys";
@@ -696,11 +833,34 @@ function extractItems(json) {
   return [];
 }
 
+// SFMC status enums — keep in sync with appStore.ts. Automation list/detail
+// endpoints return these as NUMBERS; we decode to labels so the popup shows
+// "Running" instead of "3" (and passive capture never clobbers a label).
+const AUTOMATION_STATUS_ID = {
+  "-1": "Error", "0": "BuildingError", "1": "Building", "2": "Ready",
+  "3": "Running", "4": "Paused", "5": "Stopped", "6": "Scheduled",
+  "7": "AwaitingTrigger", "8": "InactiveTrigger",
+};
+const RUN_STATUS_ID = {
+  "0": "Queued", "1": "Complete", "2": "Error", "3": "Running", "4": "Stopped",
+  "5": "Scheduled", "6": "Paused", "7": "Skipped", "8": "InactiveTrigger",
+  "9": "Building", "10": "Initializing", "100": "Complete", "200": "Error", "300": "Running",
+};
+function labelStatus(val, map) {
+  if (val == null || val === "") return null;
+  if (typeof val === "string" && !/^-?\d+$/.test(val.trim())) return val;
+  return map[String(Number(val))] || String(val);
+}
+
 function normalizeCollectionItem(collection, item) {
   if (!item || typeof item !== "object") return null;
   const normalized = { ...item, id: item.id || item.objectID || item.automationId || item.queryDefinitionId || item.key || item.customerKey, name: item.name || item.displayName || item.assetName || item.categoryName || item.definitionName || item.key || item.customerKey || "Untitled", customerKey: item.customerKey || item.key || item.externalKey || null, status: item.status || item.statusName || item.state || item.programStatus || null, capturedAt: Date.now() };
   if (collection === "journeys") normalized.version = item.version || item.versionNumber || item.latestVersionNumber || null;
-  if (collection === "automations") normalized.lastRunTime = item.lastRunTime || item.lastRunDate || item.lastRun || item.modifiedDate || null;
+  if (collection === "automations") {
+    normalized.lastRunTime = item.lastRunTime || item.lastRunDate || item.lastRun || item.modifiedDate || null;
+    normalized.status = labelStatus(item.status ?? item.statusId ?? item.statusName ?? item.automationStatus ?? item.programStatus, AUTOMATION_STATUS_ID) ?? "Unknown";
+    normalized.lastRunStatus = labelStatus(item.lastRunStatus ?? item.lastRunStatusId ?? item.lastRunStatusName, RUN_STATUS_ID) ?? null;
+  }
   return normalized.id || normalized.name ? normalized : null;
 }
 
@@ -913,8 +1073,23 @@ async function purgeOldData() {
 }
 
 function mergeItems(existing, incoming) {
+  const keyOf = item => item.id || item.key || item.name || item.url || JSON.stringify(item).slice(0, 80);
   const map = new Map();
-  for (const item of [...existing, ...incoming]) { const key = item.id || item.key || item.name || item.url || JSON.stringify(item).slice(0, 80); map.set(key, item); }
+  for (const item of existing) map.set(keyOf(item), item);
+  for (const item of incoming) {
+    const key = keyOf(item);
+    const prev = map.get(key);
+    if (!prev) { map.set(key, item); continue; }
+    // Field-level merge: incoming wins, but never overwrite an existing value
+    // with null/undefined/"" — and existing-only fields (runHistory, steps,
+    // a decoded status label) are preserved.
+    const merged = { ...prev };
+    for (const [field, val] of Object.entries(item)) {
+      if (val === null || val === undefined || val === "") continue;
+      merged[field] = val;
+    }
+    map.set(key, merged);
+  }
   return [...map.values()];
 }
 

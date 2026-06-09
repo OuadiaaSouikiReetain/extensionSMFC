@@ -5,7 +5,7 @@
 (function () {
   "use strict";
 
-  const SFMC_API_RE = /\/interaction\/v1\/|\/automation\/v1\/|\/asset\/v1\/|\/data\/v1\/|\/contacts\/v1\//i;
+  const SFMC_API_RE = /\/interaction\/v1\/|\/automation\/v1\/|\/asset\/v1\/|\/data\/v1\/|\/contacts\/v1\/|\/legacy\/v1\/beta\/automations\//i;
   const MAX_PAYLOAD = 512 * 1024; // 512 KB — skip huge responses
 
   function shouldCapture(url) {

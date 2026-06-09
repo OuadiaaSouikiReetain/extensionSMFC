@@ -81,6 +81,18 @@ export interface JourneyKpis {
   unsubs: number;
 }
 
+export interface AutomationKpis {
+  totalRuns: number;
+  successRuns: number;
+  errorRuns: number;
+  successRate: number | null;       // 0–100, null when no runs known
+  lastRunStatus: string;
+  lastRunAt: number | null;         // epoch ms
+  avgDurationSec: number | null;
+  hoursSinceLastRun: number | null;
+  computedAt: number;
+}
+
 // ── Alert rules (KPI monitoring) ──────────────────────────────────────────────
 
 export type RuleMetric =
@@ -321,4 +333,5 @@ export type View =
   | "utilities"
   | "journey-history"
   | "storage-miner"
-  | "rules";
+  | "rules"
+  | "automation-analytics";
