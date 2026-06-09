@@ -1,0 +1,33 @@
+[33mcommit c648a08917bf1defdf5f8c2c694da87afaaea746[m
+Author: wadia20 <wadiasouiki@gmail.com>
+Date:   Tue Jun 9 12:09:12 2026 +0100
+
+    feat(automations): real KPIs from gridView + Automation Analytics view
+    
+    - Decode SFMC numeric automation/run status IDs to labels
+    - Capture gridView rich data (processes->steps, start/completedTime,
+      lastRunStatus) and derive per-automation KPIs (status, last-run
+      duration, success/error, activity-type counts) — no extra fetch
+    - New Automation KPIs view: fleet aggregates (active/disabled, success
+      rate, durations, no-run-since-7d, top-failing, activity breakdown)
+    - SQL Queries: fetch + copy the real queryText with target DE
+    - Alert Rules: immediate evaluation on rule create + per-rule Run;
+      email via EmailJS/FormSubmit + desktop notification
+    - Hook: capture /legacy/v1/beta/automations/ run-history responses
+    - Non-destructive mergeItems; fueldata-version header on bg fetch
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+ sfmc-monitor-project/dist/background.js            | 179 [32m+++++++++++++[m[31m-[m
+ sfmc-monitor-project/dist/popup.js                 |   4 [32m+[m[31m-[m
+ sfmc-monitor-project/dist/sfmc-hook.js             |   2 [32m+[m[31m-[m
+ .../src/components/layout/Sidebar.tsx              |   1 [32m+[m
+ .../popup/views/AutomationAnalyticsView.tsx        | 157 [32m++++++++++++[m
+ .../src/components/popup/views/DetailView.tsx      | 145 [32m++++++++[m[31m---[m
+ sfmc-monitor-project/src/popup/PopupApp.tsx        |   4 [32m+[m
+ sfmc-monitor-project/src/static/background.js      | 179 [32m+++++++++++++[m[31m-[m
+ sfmc-monitor-project/src/static/sfmc-hook.js       |   2 [32m+[m[31m-[m
+ sfmc-monitor-project/src/store/appStore.ts         | 181 [32m++++++++++++[m[31m--[m
+ sfmc-monitor-project/src/store/types.ts            |  15 [32m+[m[31m-[m
+ sfmc-monitor-project/src/utils/automationKpis.ts   | 274 [32m+++++++++++++++++++++[m
+ 12 files changed, 1090 insertions(+), 53 deletions(-)
