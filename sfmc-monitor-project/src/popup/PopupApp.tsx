@@ -11,6 +11,7 @@ import { SettingsView } from "../components/popup/views/SettingsView";
 import { UtilitiesView } from "../components/popup/views/UtilitiesView";
 import { RulesView } from "../components/popup/views/RulesView";
 import { AutomationAnalyticsView } from "../components/popup/views/AutomationAnalyticsView";
+import { JourneyAnalyticsView } from "../components/popup/views/JourneyAnalyticsView";
 
 function DebugLog() {
   const logs = useAppStore((state) => state.logs);
@@ -51,6 +52,8 @@ export function PopupApp() {
         return <RulesView />;
       case "automation-analytics":
         return <AutomationAnalyticsView />;
+      case "journey-analytics":
+        return <JourneyAnalyticsView />;
       default:
         return <DashboardView />;
     }
@@ -89,6 +92,7 @@ function viewTitle(view: string): string {
     "storage-miner": "Storage Insights",
     rules: "Alert Rules",
     "automation-analytics": "Automation KPIs",
+    "journey-analytics": "Journey KPIs",
     settings: "Settings",
     utilities: "Utilities",
   };

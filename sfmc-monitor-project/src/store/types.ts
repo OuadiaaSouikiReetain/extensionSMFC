@@ -334,4 +334,5 @@ export type View =
   | "journey-history"
   | "storage-miner"
   | "rules"
-  | "automation-analytics";
+  | "automation-analytics"
+  | "journey-analytics";

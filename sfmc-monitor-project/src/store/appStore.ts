@@ -150,20 +150,34 @@ function normalizeJourneyItem(item: Record<string, unknown>): CachedItem {
   const rawStats = item.stats && typeof item.stats === "object"
     ? item.stats as Record<string, unknown>
     : null;
-  const rawCumPop = rawStats?.cumulativePopulation ?? item.cumulativePopulation;
-  const cumPop = Number(rawCumPop);
+  const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const cumPop = num(rawStats?.cumulativePopulation ?? item.cumulativePopulation);
+  // The journey list (extras=counters) returns rich stats for free — keep them all.
+  const stats = {
+    cumulativePopulation: cumPop,
+    currentPopulation: num(rawStats?.currentPopulation),
+    metGoal: num(rawStats?.metGoal),
+    metExitCriteria: num(rawStats?.metExitCriteria),
+    goalPerformance: num(rawStats?.goalPerformance),
+  };
   return {
     id: String(item.id || item.definitionId || item.key || ""),
     definitionId: item.definitionId ? String(item.definitionId) : null,
     key: String(item.key || item.definitionKey || item.id || ""),
     name: String(item.name || item.journeyName || item.key || "Untitled"),
     status: String(item.status || item.scheduledStatus || "Unknown"),
+    scheduledStatus: item.scheduledStatus ? String(item.scheduledStatus) : null,
     version: item.version || item.versionNumber || null,
     customerKey: item.customerKey || item.key || null,
     categoryId: item.categoryId || null,
+    channel: item.channel ?? null,
+    definitionType: item.definitionType ?? null,
+    entryMode: item.entryMode ?? null,
+    goalCount: Array.isArray(item.goals) ? item.goals.length : null,
     modifiedDate: item.modifiedDate || null,
     lastPublishedDate: item.lastPublishedDate || null,
-    ...(Number.isFinite(cumPop) ? { stats: { cumulativePopulation: cumPop }, cumulativePopulation: cumPop } : {}),
+    stats,
+    cumulativePopulation: cumPop,
     capturedAt: Date.now(),
   };
 }
@@ -707,28 +721,56 @@ export const useAppStore = create<AppStore>((set, get) => ({
           `${journeyBase}/fuelapi/interaction/v1/interactions?mostRecentVersionOnly=false&mostRecentVersionOrRunningOnly=true`,
         ];
         const freshItems = await fetchFromCandidates(urls, pageSize, tabId, normalizeJourneyItem);
-        // Preserve allVersions, activities and contact counts from previous detail fetches —
-        // the list API does not return stats so we must not wipe data populated by fetchJourneyDetail.
+
+        // The mc proxy returns the journey list but its `extras=counters` stats come
+        // back as 0. jbinteractions returns the REAL counters — fetch its list once
+        // and build an id/definitionId → stats map to enrich the population numbers.
+        const jbStatsById = new Map<string, Record<string, number>>();
+        try {
+          const jbUrl = `${journeyBase}/fuelapi/interaction/v1/interactions?extras=counters&mostRecentVersionOnly=false&$pageSize=${Math.max(pageSize, 200)}`;
+          const jbData = await fetchSfmcJb(jbUrl, tabId, true);
+          for (const li of extractArray(jbData)) {
+            const st = li.stats as Record<string, unknown> | undefined;
+            if (!st) continue;
+            const entry = {
+              cumulativePopulation: Number(st.cumulativePopulation ?? 0),
+              currentPopulation: Number(st.currentPopulation ?? 0),
+              metGoal: Number(st.metGoal ?? 0),
+              metExitCriteria: Number(st.metExitCriteria ?? 0),
+              goalPerformance: Number(st.goalPerformance ?? 0),
+            };
+            for (const k of [li.id, li.definitionId, li.key]) if (k) jbStatsById.set(String(k), entry);
+          }
+          if (jbStatsById.size) addLog(`Journey counters from jbinteractions: ${jbStatsById.size} entries.`);
+        } catch { /* jbinteractions unavailable — fall back to proxy/cached values */ }
+
+        // Preserve allVersions/activities from prior detail fetches; merge best stats.
         const prevJourneys = cache["journeys"];
         return freshItems.map(item => {
+          const jb = jbStatsById.get(String(item.id))
+            || jbStatsById.get(String((item as Record<string, unknown>).definitionId || ""))
+            || jbStatsById.get(String(item.key || ""));
           const prev = prevJourneys.find(p => String(p.id) === String(item.id)) as Record<string, unknown> | undefined;
-          if (!prev) return item;
+          const itemStats = item.stats as Record<string, unknown> || {};
           const existingCum = Math.max(
-            Number((prev.stats as Record<string, unknown> | undefined)?.cumulativePopulation ?? 0),
-            Number(prev.cumulativePopulation ?? 0),
-            Number((prev.allVersions as Array<{ cumulativePopulation: number }> | undefined)
+            Number((prev?.stats as Record<string, unknown> | undefined)?.cumulativePopulation ?? 0),
+            Number(prev?.cumulativePopulation ?? 0),
+            Number((prev?.allVersions as Array<{ cumulativePopulation: number }> | undefined)
               ?.reduce((m, v) => Math.max(m, v.cumulativePopulation || 0), 0) ?? 0)
           );
-          const freshCum = Math.max(
-            Number((item.stats as Record<string, unknown> | undefined)?.cumulativePopulation ?? 0),
-            Number(item.cumulativePopulation ?? 0)
-          );
-          const bestCum = Math.max(existingCum, freshCum);
+          const bestCum = Math.max(existingCum, Number(itemStats.cumulativePopulation ?? 0), jb?.cumulativePopulation ?? 0);
+          // jbinteractions stats win when present (proxy gives zeros), then proxy, then prev.
+          const mergedStats = {
+            ...itemStats,
+            ...(jb ? jb : {}),
+            cumulativePopulation: bestCum,
+          };
           return {
             ...item,
-            ...(prev.allVersions ? { allVersions: prev.allVersions } : {}),
-            ...(prev.activities ? { activities: prev.activities } : {}),
-            ...(bestCum > 0 ? { stats: { cumulativePopulation: bestCum }, cumulativePopulation: bestCum } : {}),
+            ...(prev?.allVersions ? { allVersions: prev.allVersions } : {}),
+            ...(prev?.activities ? { activities: prev.activities } : {}),
+            stats: mergedStats,
+            cumulativePopulation: bestCum,
           };
         });
       });

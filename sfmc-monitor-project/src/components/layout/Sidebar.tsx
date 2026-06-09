@@ -119,6 +119,7 @@ interface NavItem { id: View; label: string; icon: React.FC }
 const NAV: NavItem[] = [
   { id: "dashboard",       label: "Dashboard",        icon: Icon.Dashboard },
   { id: "analytics",       label: "Analytics",        icon: Icon.Analytics },
+  { id: "journey-analytics", label: "Journey KPIs",   icon: Icon.Journeys },
   { id: "automation-analytics", label: "Automation KPIs", icon: Icon.Automations },
   { id: "journey-history", label: "Journey History",  icon: Icon.JourneyHistory },
   { id: "storage-miner",   label: "Storage Insights", icon: Icon.StorageMiner },
