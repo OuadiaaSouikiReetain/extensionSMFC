@@ -76,6 +76,7 @@ interface AppStore {
   fetchAutomationDetail: (automationId: string, opts?: { silent?: boolean }) => Promise<void>;
   refreshAllAutomationKpis: (cap?: number) => Promise<void>;
   fetchQueryDetail: (queryId: string) => Promise<void>;
+  searchJourneysApi: (query: string) => Promise<number>;
   fetchKpisFromDataViews: (journeyId: string, journeyName: string, tsIds: string[]) => Promise<void>;
   saveRule: (rule: AlertRule) => Promise<void>;
   deleteRule: (ruleId: string) => Promise<void>;
@@ -1725,6 +1726,56 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await chrome.storage.local.set({ sfmcBuddyCache: { cache: newCache, updatedAt, savedAt: Date.now() } });
     set({ cache: newCache, updatedAt });
     addLog(`Query "${String(detail.name || queryId)}" — ${detail.queryText ? `${String(detail.queryText).length} chars SQL` : "no SQL returned"}.`);
+  },
+
+  // Server-side journey search by name (SFMC ?name= filter) — finds journeys
+  // that aren't in the local cache (large orgs, not-yet-synced). Results merge
+  // into cache.journeys so the existing local filter shows them.
+  searchJourneysApi: async (query) => {
+    const { addLog } = get();
+    const q = query.trim();
+    if (!q) return 0;
+    const resolvedTab = await resolveSfmcTab() || get().activeTab;
+    if (!resolvedTab?.id || !resolvedTab.url || !isSfmcUrl(resolvedTab.url)) {
+      addLog("No active SFMC tab — open SFMC first.");
+      return 0;
+    }
+    if (resolvedTab !== get().activeTab) set({ activeTab: resolvedTab });
+    const stack = getStack(resolvedTab.url);
+    if (!stack) { addLog("Cannot detect SFMC stack."); return 0; }
+
+    const tabId = resolvedTab.id;
+    const classicBase = `https://mc.${stack}.exacttarget.com/cloud/fuelapi`;
+    const jbBase = `https://jbinteractions.${stack}.marketingcloudapps.com/fuelapi`;
+    const enc = encodeURIComponent(q);
+    const urls = [
+      `${classicBase}/interaction/v1/interactions?name=${enc}&extras=counters&$pageSize=50`,
+      `${jbBase}/interaction/v1/interactions?name=${enc}&extras=counters&$pageSize=50`,
+      `${classicBase}/interaction/v1/interactions?nameOrDescription=${enc}&$pageSize=50`,
+    ];
+
+    addLog(`🔎 Searching SFMC for journeys matching "${q}"…`);
+    let found: CachedItem[] = [];
+    for (const url of urls) {
+      try {
+        const data = await fetchSfmc(url, tabId, true);
+        const items = extractArray(data).map(normalizeJourneyItem).filter(j => j.id || j.name);
+        if (items.length) { found = items; break; }
+      } catch { /* try next */ }
+    }
+    if (!found.length) { addLog(`No SFMC journeys matched "${q}".`); return 0; }
+
+    // Merge into cache (incoming wins; keep existing rich fields otherwise).
+    const cache = { ...get().cache };
+    const existing = cache["journeys"];
+    const byId = new Map(existing.map(j => [String(j.id), j]));
+    for (const j of found) byId.set(String(j.id), { ...byId.get(String(j.id)), ...j });
+    cache["journeys"] = [...byId.values()];
+    const updatedAt = { ...get().updatedAt, journeys: Date.now() };
+    await chrome.storage.local.set({ sfmcBuddyCache: { cache, updatedAt, savedAt: Date.now() } });
+    set({ cache, updatedAt });
+    addLog(`🔎 Found ${found.length} journey(s) for "${q}".`);
+    return found.length;
   },
 
   fetchKpisFromDataViews: async (journeyId, journeyName, tsIds) => {
