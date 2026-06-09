@@ -31,12 +31,19 @@ const LABELS: Record<CollectionKey, string> = {
 };
 
 export function CollectionView() {
-  const { cache, updatedAt, activeCollection, setView, purgeCache, addLog } = useAppStore();
+  const { cache, updatedAt, activeCollection, setView, purgeCache, addLog, searchJourneysApi } = useAppStore();
   const key = (activeCollection || "journeys") as CollectionKey;
   const items: CachedItem[] = cache[key] ?? [];
   const columns = COLS[key] ?? ["name"];
   const [search, setSearch] = useState("");
+  const [deepSearching, setDeepSearching] = useState(false);
   const deferredSearch = useDeferredValue(search);
+
+  const runDeepSearch = async () => {
+    if (deepSearching || !search.trim()) return;
+    setDeepSearching(true);
+    try { await searchJourneysApi(search.trim()); } finally { setDeepSearching(false); }
+  };
 
   const filtered = useMemo(() => {
     if (!deferredSearch.trim()) return items;
@@ -80,11 +87,17 @@ export function CollectionView() {
           </svg>
           <input
             className="input search-input"
-            placeholder={`Search ${LABELS[key]}`}
+            placeholder={key === "journeys" ? "Search journeys (Enter = search SFMC)" : `Search ${LABELS[key]}`}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && key === "journeys") void runDeepSearch(); }}
           />
         </div>
+        {key === "journeys" && search.trim() && (
+          <Button variant="secondary" size="sm" loading={deepSearching} onClick={() => void runDeepSearch()}>
+            Search SFMC
+          </Button>
+        )}
         <div className="collection-header-meta">
           <div className="collection-chip">{key.toUpperCase().slice(0, 3)}</div>
           <div>
@@ -98,7 +111,14 @@ export function CollectionView() {
         {!filtered.length ? (
           <EmptyState
             title="No items available"
-            message={search ? "No items match this search." : "Run Sync all collections from the dashboard first."}
+            message={search
+              ? (key === "journeys"
+                ? "Not in the local cache. Search SFMC directly to fetch it by name."
+                : "No items match this search.")
+              : "Run Sync all collections from the dashboard first."}
+            action={search && key === "journeys"
+              ? <Button variant="primary" loading={deepSearching} onClick={() => void runDeepSearch()}>Search SFMC for “{search.trim()}”</Button>
+              : undefined}
           />
         ) : key === "journeys" ? (
           /* ── Journey card list ─────────────────────────────────────────── */
